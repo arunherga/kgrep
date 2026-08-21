@@ -2,6 +2,8 @@
 
 A Kafka consumer/inspector CLI written in Go, using a pure-Go Kafka client.
 
+See [docs/architecture.md](docs/architecture.md) for how the code is put together (package responsibilities, data flow, key invariants) if you're changing rather than just running it.
+
 ## Functionality
 
 - `consume`: scan and filter records, optionally printing and/or writing CSV
