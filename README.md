@@ -1,66 +1,172 @@
 # kgrep
 
-A Kafka consumer/inspector CLI written in Go, using a pure-Go Kafka client.
+A command-line tool for looking inside a Kafka topic: search for specific records, export what you find to a CSV file, or just watch messages go by — without writing any code.
 
-## Documentation
+## What you can do with it
 
-- [docs/commands.md](docs/commands.md) — the three commands (`consume`/`dump`/`print`), output columns, the scan summary
-- [docs/matching.md](docs/matching.md) — match modes, field paths, the `delivery-identifiers` shortcut
-- [docs/decoding.md](docs/decoding.md) — format inference, Avro/Schema Registry behavior, what makes a record "bad"
-- [docs/architecture.md](docs/architecture.md) — package responsibilities, data flow, key invariants, for anyone changing the code rather than just running it
+- **Search** a topic for records matching values you care about (an order ID, a customer ID, anything) — [`consume`](docs/commands.md)
+- **Export** everything in a topic to a CSV file you can open in Excel or Google Sheets — [`dump`](docs/commands.md)
+- **Watch** records scroll by live in your terminal, for a quick look — [`print`](docs/commands.md)
 
-## Functionality
+It automatically understands plain text, JSON, and Avro-encoded messages, and it tells you clearly when a record couldn't be read, instead of silently skipping it or crashing.
 
-- `consume`: scan and filter records, optionally printing and/or writing CSV
-- `dump`: emit all records when no allowed-values file is supplied
-- `print`: print all records when no allowed-values file is supplied
-- independent `auto`, `json`, `avro`, `string`, and `bytes` decoding for keys and values
-- Confluent wire-format Avro decoding through Schema Registry, with schema-ID caching
-- raw Kafka-key, decoded-key, decoded-value, key-or-value, and key-and-value matching
-- recursive matching or repeatable dot-separated key/value field paths
-- the `delivery-identifiers` field shortcut
-- epoch/ISO-8601 time bounds, IANA timezone output, environment profiles, CSV output, bounded reads, graceful cancellation, and verbose diagnostics
-- good/bad deserialization counts, with topic, partition, offset, and key/value error details for every bad record
+---
 
-The Kafka reader snapshots each partition's high watermark before scanning. This gives the command a finite endpoint even while producers continue writing.
+## Quick start (no coding required)
 
-Deserialization failures do not stop a scan. A record is counted as good only when both its key and value deserialize successfully. If either side fails, the CLI prints its exact location and the corresponding error, continues scanning, and includes it in the final bad-record count:
+### 1. Download kgrep
+
+Go to the [Releases page](https://github.com/arunherga/kgrep/releases/latest) and download the file that matches your computer:
+
+| Your computer | Download |
+|---|---|
+| Windows | `kgrep-windows-amd64.exe` |
+| Mac (Apple Silicon — M1/M2/M3/M4) | `kgrep-darwin-arm64` |
+| Mac (Intel) | `kgrep-darwin-amd64` |
+| Linux | `kgrep-linux-amd64` |
+
+Not sure which Mac you have? Click the Apple menu → **About This Mac**. If it says "Apple M1/M2/M3/M4," pick Apple Silicon; if it says "Intel," pick Intel.
+
+Detailed step-by-step download/verify/install commands for each OS are in [Installing in detail](#installing-in-detail) below.
+
+### 2. Tell it how to connect to Kafka
+
+kgrep reads its connection details from a plain text file named `.env`, sitting next to the program. Ask whoever manages your Kafka cluster for these values, then create a file called `.env` with a text editor (Notepad, TextEdit, VS Code — anything that saves plain text) containing:
+
+```dotenv
+KAFKA_BOOTSTRAP_SERVERS=broker-a:9092,broker-b:9092
+KAFKA_SECURITY_PROTOCOL=SASL_SSL
+KAFKA_SASL_MECHANISM=PLAIN
+KAFKA_USERNAME=the-username-you-were-given
+KAFKA_PASSWORD=the-password-you-were-given
+KAFKA_DEFAULT_TOPIC=the-topic-you-want-to-look-at
+```
+
+Save it in the same folder as the `kgrep` program. See [Configuration](#configuration) below for what each line means and what to do if your setup also uses Schema Registry.
+
+### 3. Run your first command
+
+Open a terminal in the folder where you saved `kgrep` and its `.env` file, then run:
+
+```sh
+kgrep print --read-all
+```
+
+(On Windows, run `kgrep.exe print --read-all` instead.)
+
+This connects to the topic named in `KAFKA_DEFAULT_TOPIC` and prints every record it finds. To stop early, press `Ctrl+C`.
+
+### 4. Understand what you're seeing
+
+Each line printed is one record. At the end, you'll see a summary like:
 
 ```text
-BAD orders[3]@42 key_error=decode key as JSON: unexpected EOF
-BAD orders[5]@107 value_error=decode value as Avro: invalid Confluent wire header
 Scanned: 250
 Good records: 248
 Bad records: 2
 Emitted: 248
 ```
 
-`Emitted` can be lower than `Good records` when filters are active. `--max-messages` limits the total number of inspected records, including bad records.
+- **Scanned** — how many records it looked at in total.
+- **Good records** — how many it could read successfully.
+- **Bad records** — how many it couldn't read (shown above the summary, with the reason and exact location — this doesn't stop the scan).
+- **Emitted** — how many were actually shown to you (lower than "Good records" if you searched for specific values and most records didn't match).
 
-For meaningful data-quality counts, set the expected formats explicitly, such as `--key-format string --value-format avro`. In `auto` mode, valid UTF-8 that is not valid JSON is intentionally treated as a string, and arbitrary binary data is treated as bytes; those values are therefore considered successfully deserialized.
+---
 
-## Install a prebuilt binary
+## A few everyday examples
 
-Every tag pushed as `vX.Y.Z` on `main` builds and publishes binaries via [GitHub Actions](.github/workflows/release.yml) to the [Releases page](https://github.com/arunherga/kgrep/releases). Five binaries are published per release — one per OS/architecture combination — each with a matching `.sha256` checksum file:
-
-| OS | Architecture | Asset |
-|---|---|---|
-| Linux | x86_64 | `kgrep-linux-amd64` |
-| Linux | arm64 | `kgrep-linux-arm64` |
-| macOS | Intel | `kgrep-darwin-amd64` |
-| macOS | Apple Silicon | `kgrep-darwin-arm64` |
-| Windows | x86_64 | `kgrep-windows-amd64.exe` |
-
-(GitHub also auto-attaches "Source code (zip/tar.gz)" to every release — that's a GitHub feature, not something this project adds.)
-
-### Linux / macOS
+**Export everything from a topic to a CSV file** (open it later in Excel/Sheets):
 
 ```sh
-# Pick the asset matching your OS/arch from the table above
+kgrep dump --topic orders-crud --output-csv my_export.csv
+```
+
+**Search for specific values** — say you have a spreadsheet column of order IDs saved as `order_ids.csv`, and you want to find matching Kafka records:
+
+```sh
+kgrep consume --topic orders-crud --allowed-keys-csv order_ids.csv
+```
+
+**Only look at a specific time window:**
+
+```sh
+kgrep dump --topic orders-crud \
+  --from-time 2026-04-13T00:00:00Z \
+  --to-time 2026-04-14T00:00:00Z \
+  --output-csv day_export.csv
+```
+
+**Keep a live view while archiving to CSV at the same time:**
+
+```sh
+kgrep consume --topic orders-crud --read-all --output-csv archive.csv
+```
+
+**See everything kgrep is doing behind the scenes** (useful when something looks wrong and you want more detail — this extra detail is kept separate from your actual results):
+
+```sh
+kgrep consume --topic orders-crud --read-all --verbose
+```
+
+For the full list of commands and options, see [docs/commands.md](docs/commands.md), [docs/matching.md](docs/matching.md) (how searching works), and [docs/decoding.md](docs/decoding.md) (how message formats are handled).
+
+---
+
+## Configuration
+
+kgrep is configured entirely through environment variables — usually via a `.env` file, so you never have to type secrets on the command line (which would leave them visible in your terminal history).
+
+| Setting | What it means |
+|---|---|
+| `KAFKA_BOOTSTRAP_SERVERS` | The address(es) of your Kafka cluster. Ask your Kafka administrator. Multiple addresses are comma-separated. |
+| `KAFKA_SECURITY_PROTOCOL` | How to connect securely. One of `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL` — ask your administrator which one your cluster uses. |
+| `KAFKA_SASL_MECHANISM` | Only needed for `SASL_SSL`/`SASL_PLAINTEXT`. One of `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`. |
+| `KAFKA_USERNAME` / `KAFKA_PASSWORD` | Your Kafka login credentials. |
+| `KAFKA_DEFAULT_TOPIC` | The topic to use when you don't pass `--topic` on the command line. |
+| `SCHEMA_REGISTRY_URL` | Only needed if your messages are Avro-encoded. The address of your Schema Registry. |
+| `SCHEMA_REGISTRY_USERNAME` / `SCHEMA_REGISTRY_PASSWORD` | Only needed if Schema Registry requires a login. |
+
+A ready-to-copy template is in [.env.example](.env.example) — copy it to `.env` and fill in your real values.
+
+### Using more than one environment (dev / qa / prod)
+
+If you regularly switch between environments, keep the shared settings in `.env` and put anything that differs (like `KAFKA_BOOTSTRAP_SERVERS`) into a second file named `.env.qa` (or `.env.prod`, etc.). Then add `--profile qa` right after `kgrep`, before the command:
+
+```sh
+kgrep --profile qa print --read-all
+```
+
+kgrep loads `.env` first, then overlays `.env.qa` on top of it.
+
+---
+
+## Installing in detail
+
+### Windows (PowerShell)
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe -OutFile kgrep.exe
+Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe.sha256 -OutFile kgrep.exe.sha256
+
+# Optional but recommended: verify the file wasn't corrupted or tampered with
+if ((Get-FileHash .\kgrep.exe -Algorithm SHA256).Hash.ToLower() -ne ((Get-Content .\kgrep.exe.sha256) -split '\s+')[0]) {
+    throw "checksum mismatch"
+}
+
+.\kgrep.exe --version
+```
+
+You can now run it as `.\kgrep.exe` from this folder. To run it as just `kgrep` from anywhere, move `kgrep.exe` into a folder that's already on your `PATH`.
+
+### macOS / Linux
+
+```sh
+# Replace kgrep-linux-amd64 with the file name matching your computer (see the table above)
 curl -fLO https://github.com/arunherga/kgrep/releases/latest/download/kgrep-linux-amd64
 curl -fLO https://github.com/arunherga/kgrep/releases/latest/download/kgrep-linux-amd64.sha256
 
-# Verify the download against the published checksum
+# Optional but recommended: verify the file wasn't corrupted or tampered with
 sha256sum -c kgrep-linux-amd64.sha256
 
 chmod +x kgrep-linux-amd64
@@ -69,35 +175,28 @@ sudo mv kgrep-linux-amd64 /usr/local/bin/kgrep
 kgrep --version
 ```
 
-Substitute `kgrep-darwin-amd64` or `kgrep-darwin-arm64` for macOS. On macOS you'll also need to clear Gatekeeper's quarantine on the first run, since the binary isn't notarized:
+On macOS, the first run may be blocked by Gatekeeper since the binary isn't notarized. If so, run:
 
 ```sh
 xattr -d com.apple.quarantine /usr/local/bin/kgrep
 ```
 
-### Windows (PowerShell)
+### Getting a specific version instead of the latest
 
-```powershell
-Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe -OutFile kgrep.exe
-Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe.sha256 -OutFile kgrep.exe.sha256
+Every release is also available individually. Replace `latest` in the URLs above with a version tag, e.g. `.../releases/download/v1.0.0/kgrep-linux-amd64`, to install that exact version instead of always tracking the newest one.
 
-# Verify the download against the published checksum
-if ((Get-FileHash .\kgrep.exe -Algorithm SHA256).Hash.ToLower() -ne ((Get-Content .\kgrep.exe.sha256) -split '\s+')[0]) {
-    throw "checksum mismatch"
-}
+---
 
-.\kgrep.exe --version
-```
+## Documentation
 
-Move `kgrep.exe` onto your `PATH` (e.g. into a folder already listed in `$env:PATH`) to run it as `kgrep` from anywhere.
+- [docs/commands.md](docs/commands.md) — the three commands in depth, output columns, the scan summary
+- [docs/matching.md](docs/matching.md) — how searching for values works, field paths, the `delivery-identifiers` shortcut
+- [docs/decoding.md](docs/decoding.md) — how message formats are detected, Avro/Schema Registry behavior, what makes a record "bad"
+- [docs/architecture.md](docs/architecture.md) — for contributors changing the code: package responsibilities, data flow, key invariants
 
-### Pinning a specific version
+## For developers
 
-Replace `latest` in the URLs above with a tag, e.g. `.../releases/download/v1.0.0/kgrep-linux-amd64`, to install a specific release instead of always tracking the newest one.
-
-## Build and test
-
-Go 1.25 or newer is required.
+Building from source requires Go 1.25 or newer.
 
 ```sh
 go test -race ./...
@@ -105,58 +204,11 @@ go vet ./...
 go build -trimpath -o bin/kgrep ./cmd/kgrep
 ```
 
-## Configuration
-
-The environment variable names match the Python CLI:
-
-```dotenv
-KAFKA_BOOTSTRAP_SERVERS=broker-a:9092,broker-b:9092
-KAFKA_SECURITY_PROTOCOL=SASL_SSL
-KAFKA_SASL_MECHANISM=PLAIN
-KAFKA_USERNAME=replace-me
-KAFKA_PASSWORD=replace-me
-KAFKA_DEFAULT_TOPIC=replace-me
-SCHEMA_REGISTRY_URL=https://registry.example
-SCHEMA_REGISTRY_USERNAME=replace-me
-SCHEMA_REGISTRY_PASSWORD=replace-me
-```
-
-Shared values are loaded from `.env`. A command such as `--profile qa` then loads `.env.qa` and overrides shared values. Secrets are never accepted as command-line options, which keeps them out of shell history and process listings.
-
-## Examples
-
-```sh
-# Help
-./bin/kgrep --help
-
-# Read every message in the snapshot and write it to CSV
-./bin/kgrep --profile dev consume \
-  --topic orders-crud \
-  --key-format string \
-  --value-format avro \
-  --read-all \
-  --output-csv kafka_dump.csv
-
-# Search selected nested value fields
-./bin/kgrep --profile prod consume \
-  --topic shipments-intransit \
-  --allowed-keys-csv ../search_value.csv \
-  --match-mode value-field \
-  --field-shortcut delivery-identifiers \
-  --print-matches-only
-
-# Dump a bounded time range
-./bin/kgrep dump \
-  --topic orders-crud \
-  --from-time 2026-04-13T00:00:00Z \
-  --to-time 2026-04-14T00:00:00Z \
-  --output-csv kafka_dump.csv
-```
-
-Global options (`--env-file` and `--profile`) must appear before the command, matching the Python CLI. Command-specific options appear after it.
+Every tag pushed as `vX.Y.Z` on `main` automatically builds and publishes binaries for Linux, macOS, and Windows via [GitHub Actions](.github/workflows/release.yml).
 
 ## Compatibility notes
 
 - Kafka security protocols `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` are recognized. SASL mechanisms `PLAIN`, `SCRAM-SHA-256`, and `SCRAM-SHA-512` are supported.
-- Avro payloads must use Confluent's five-byte wire header. The schema ID in each message selects the writer schema; verbose mode additionally reports the standard `<topic>-key` or `<topic>-value` subject's latest version.
+- Avro payloads must use Confluent's five-byte wire header. The schema ID in each message selects the writer schema; `--verbose` additionally reports the standard `<topic>-key` or `<topic>-value` subject's latest version.
 - `--max-messages 0` means unlimited. Negative limits and invalid time ranges are rejected early.
+- Deserialization failures never stop a scan — a record is counted "good" only if both its key and value decode successfully; failures are reported with their exact topic/partition/offset location and counted separately. See [docs/decoding.md](docs/decoding.md) for details.
