@@ -82,11 +82,21 @@ Emitted: 248
 kgrep dump --topic orders-crud --output-csv my_export.csv
 ```
 
-**Search for specific values** — say you have a spreadsheet column of order IDs saved as `order_ids.csv`, and you want to find matching Kafka records:
+**Search for specific values** — say you have a list of order IDs you're looking for. Save them as `order_ids.csv`, one per line (or one per column) — just the values, **no header row**:
+
+```csv
+order-1001
+order-1002
+order-1005
+```
+
+Then point kgrep at it:
 
 ```sh
 kgrep consume --topic orders-crud --allowed-keys-csv order_ids.csv
 ```
+
+kgrep will scan the topic and only show you records where one of these values appears — as the record's key, inside its decoded value, or both, depending on `--match-mode` (see [docs/matching.md](docs/matching.md)). Every non-empty cell in the file counts as a value to search for, so leave out any header/column-title row — it would otherwise be treated as a value to search for too.
 
 **Only look at a specific time window:**
 
@@ -147,10 +157,11 @@ kgrep loads `.env` first, then overlays `.env.qa` on top of it.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe -OutFile kgrep.exe
-Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe.sha256 -OutFile kgrep.exe.sha256
+Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/checksums.txt -OutFile checksums.txt
 
 # Optional but recommended: verify the file wasn't corrupted or tampered with
-if ((Get-FileHash .\kgrep.exe -Algorithm SHA256).Hash.ToLower() -ne ((Get-Content .\kgrep.exe.sha256) -split '\s+')[0]) {
+$expected = ((Select-String -Path checksums.txt -Pattern 'kgrep-windows-amd64\.exe$' | Select-Object -First 1).Line -split '\s+')[0]
+if ((Get-FileHash .\kgrep.exe -Algorithm SHA256).Hash.ToLower() -ne $expected) {
     throw "checksum mismatch"
 }
 
@@ -164,10 +175,12 @@ You can now run it as `.\kgrep.exe` from this folder. To run it as just `kgrep` 
 ```sh
 # Replace kgrep-linux-amd64 with the file name matching your computer (see the table above)
 curl -fLO https://github.com/arunherga/kgrep/releases/latest/download/kgrep-linux-amd64
-curl -fLO https://github.com/arunherga/kgrep/releases/latest/download/kgrep-linux-amd64.sha256
+curl -fLO https://github.com/arunherga/kgrep/releases/latest/download/checksums.txt
 
 # Optional but recommended: verify the file wasn't corrupted or tampered with
-sha256sum -c kgrep-linux-amd64.sha256
+sha256sum -c checksums.txt --ignore-missing
+# macOS doesn't have sha256sum by default — use this instead:
+# shasum -a 256 -c checksums.txt --ignore-missing
 
 chmod +x kgrep-linux-amd64
 sudo mv kgrep-linux-amd64 /usr/local/bin/kgrep

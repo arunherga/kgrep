@@ -4,15 +4,15 @@ Filtering works by supplying a set of *allowed values* (via `--allowed-keys-csv`
 
 ## The allowed-values file
 
-`--allowed-keys-csv` points at a CSV file. Every non-empty cell across every row and column is added to the allowed-values set — there's no fixed column layout, so you can keep the values in one column or several:
+`--allowed-keys-csv` points at a CSV file. Every non-empty cell across every row and column is added to the allowed-values set, with **no header-row awareness** — there's no fixed column layout, so you can keep the values in one column or several, but the loader has no concept of a title row and will add one literally if you include it:
 
 ```csv
-order_id,alt_id
-order-42,ALT-9001
-order-43,
+order-42
+ALT-9001
+order-43
 ```
 
-This loads `{"order-42", "ALT-9001", "order-43"}` as the allowed set.
+This loads `{"order-42", "ALT-9001", "order-43"}` as the allowed set. If you added a header row (e.g. `order_id,alt_id`), the header cells themselves would also be added to the set — harmless in practice, since they're unlikely to match anything in your actual data, but worth knowing so you don't mistake it for a bug.
 
 ## Match modes (`--match-mode`)
 
