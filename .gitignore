@@ -1,0 +1,6 @@
+/bin/
+*.exe
+*.csv
+.env
+.env.*
+!.env.example
