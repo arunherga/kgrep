@@ -33,6 +33,62 @@ Emitted: 248
 
 For meaningful data-quality counts, set the expected formats explicitly, such as `--key-format string --value-format avro`. In `auto` mode, valid UTF-8 that is not valid JSON is intentionally treated as a string, and arbitrary binary data is treated as bytes; those values are therefore considered successfully deserialized.
 
+## Install a prebuilt binary
+
+Every tag pushed as `vX.Y.Z` on `main` builds and publishes binaries via [GitHub Actions](.github/workflows/release.yml) to the [Releases page](https://github.com/arunherga/kgrep/releases). Five binaries are published per release — one per OS/architecture combination — each with a matching `.sha256` checksum file:
+
+| OS | Architecture | Asset |
+|---|---|---|
+| Linux | x86_64 | `kgrep-linux-amd64` |
+| Linux | arm64 | `kgrep-linux-arm64` |
+| macOS | Intel | `kgrep-darwin-amd64` |
+| macOS | Apple Silicon | `kgrep-darwin-arm64` |
+| Windows | x86_64 | `kgrep-windows-amd64.exe` |
+
+(GitHub also auto-attaches "Source code (zip/tar.gz)" to every release — that's a GitHub feature, not something this project adds.)
+
+### Linux / macOS
+
+```sh
+# Pick the asset matching your OS/arch from the table above
+curl -fLO https://github.com/arunherga/kgrep/releases/latest/download/kgrep-linux-amd64
+curl -fLO https://github.com/arunherga/kgrep/releases/latest/download/kgrep-linux-amd64.sha256
+
+# Verify the download against the published checksum
+sha256sum -c kgrep-linux-amd64.sha256
+
+chmod +x kgrep-linux-amd64
+sudo mv kgrep-linux-amd64 /usr/local/bin/kgrep
+
+kgrep --version
+```
+
+Substitute `kgrep-darwin-amd64` or `kgrep-darwin-arm64` for macOS. On macOS you'll also need to clear Gatekeeper's quarantine on the first run, since the binary isn't notarized:
+
+```sh
+xattr -d com.apple.quarantine /usr/local/bin/kgrep
+```
+
+### Windows (PowerShell)
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe -OutFile kgrep.exe
+Invoke-WebRequest -Uri https://github.com/arunherga/kgrep/releases/latest/download/kgrep-windows-amd64.exe.sha256 -OutFile kgrep.exe.sha256
+
+# Verify the download against the published checksum
+if ((Get-FileHash .\kgrep.exe -Algorithm SHA256).Hash.ToLower() -ne ((Get-Content .\kgrep.exe.sha256) -split '\s+')[0]) {
+    throw "checksum mismatch"
+}
+
+.\kgrep.exe --version
+```
+
+Move `kgrep.exe` onto your `PATH` (e.g. into a folder already listed in `$env:PATH`) to run it as `kgrep` from anywhere.
+
+### Pinning a specific version
+
+Replace `latest` in the URLs above with a tag, e.g. `.../releases/download/v1.0.0/kgrep-linux-amd64`, to install a specific release instead of always tracking the newest one.
+
 ## Build and test
 
 Go 1.25 or newer is required.
