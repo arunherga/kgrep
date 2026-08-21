@@ -98,6 +98,8 @@ kgrep consume --topic orders-crud --allowed-keys-csv order_ids.csv
 
 kgrep will scan the topic and only show you records where one of these values appears — as the record's key, inside its decoded value, or both, depending on `--match-mode` (see [docs/matching.md](docs/matching.md)). Every non-empty cell in the file counts as a value to search for, so leave out any header/column-title row — it would otherwise be treated as a value to search for too.
 
+Comma-separated values on one line work too (`order-1001,order-1002,order-1005`) — one value per line or several per line, mixed however you like, all get read the same way. Matching is always by exact text, so put the value in the file exactly as it appears in your Kafka data.
+
 **Only look at a specific time window:**
 
 ```sh

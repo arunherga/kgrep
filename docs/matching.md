@@ -14,6 +14,18 @@ order-43
 
 This loads `{"order-42", "ALT-9001", "order-43"}` as the allowed set. If you added a header row (e.g. `order_id,alt_id`), the header cells themselves would also be added to the set — harmless in practice, since they're unlikely to match anything in your actual data, but worth knowing so you don't mistake it for a bug.
 
+The file is parsed by a real CSV reader, not split on newlines, so comma-separated values on a single line work exactly like one-per-line — `order-42,order-43` and two separate lines `order-42` / `order-43` load identically. You can mix both styles in the same file.
+
+### Matching is always by exact text
+
+CSV cells have no type — they're just strings. On the Kafka side, whatever kgrep decodes (a raw key, a JSON number, a boolean, `null`, an Avro field, …) is converted to text before comparison, the same way every time:
+
+- `null` → `None`
+- `true` / `false` → `True` / `False`
+- everything else → its printed form — a JSON number keeps the exact digits it had in the source payload (e.g. `123.450` stays `123.450`, not renormalized to `123.45`)
+
+There's no numeric-aware matching on top of that — `123` and `123.0` are different strings and won't match each other. Put the value in your CSV exactly as it appears in the actual Kafka data (as text), regardless of whether the underlying field is a string, number, or boolean.
+
 ## Match modes (`--match-mode`)
 
 | Mode | Matches against |
