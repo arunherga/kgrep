@@ -1,6 +1,7 @@
 package decode
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -27,7 +28,7 @@ func TestInferFormat(t *testing.T) {
 }
 
 func TestDeserializerJSONAndString(t *testing.T) {
-	deserializer := New("topic", "string", "json", config.SchemaRegistrySettings{}, false)
+	deserializer := New("topic", "string", "json", config.SchemaRegistrySettings{}, false, io.Discard)
 	key, format, err := deserializer.DecodeKey([]byte("key"))
 	if err != nil || key != "key" || format != "string" {
 		t.Fatalf("key=%#v format=%s err=%v", key, format, err)
@@ -60,7 +61,7 @@ func TestDeserializerFetchesAndCachesConfluentAvroSchema(t *testing.T) {
 	wire := make([]byte, 5, len(payload)+5)
 	binary.BigEndian.PutUint32(wire[1:], 42)
 	wire = append(wire, payload...)
-	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{URL: "https://registry.example", Username: "user", Password: "secret"}, false)
+	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{URL: "https://registry.example", Username: "user", Password: "secret"}, false, io.Discard)
 	deserializer.registry.http.Transport = transport
 	first, _, err := deserializer.DecodeValue(wire)
 	if err != nil || !reflect.DeepEqual(first, map[string]any{"id": "abc"}) {
@@ -80,8 +81,19 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
+func TestVerboseDiagnosticsWriteToInjectedWriter(t *testing.T) {
+	var diagnostics bytes.Buffer
+	deserializer := New("topic", "auto", "auto", config.SchemaRegistrySettings{}, true, &diagnostics)
+	if _, _, err := deserializer.DecodeValue([]byte(`{"id":123}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diagnostics.String(), "Inferred value format as json") {
+		t.Fatalf("expected diagnostic in injected writer, got: %s", diagnostics.String())
+	}
+}
+
 func TestAvroRequiresConfluentHeader(t *testing.T) {
-	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{}, false)
+	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{}, false, io.Discard)
 	if _, _, err := deserializer.DecodeValue([]byte("bad")); err == nil {
 		t.Fatal("expected invalid wire header error")
 	}

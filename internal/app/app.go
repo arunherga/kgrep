@@ -49,7 +49,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	global := flag.NewFlagSet("kafka-cli", flag.ContinueOnError)
+	global := flag.NewFlagSet("kgrep", flag.ContinueOnError)
 	global.SetOutput(stderr)
 	envFile := global.String("env-file", ".env", "Path to .env file")
 	profile := global.String("profile", "", "Environment profile name")
@@ -80,7 +80,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if options.verbose && len(loaded) > 0 {
 			fmt.Fprintf(stdout, "Loaded environment files: %s\n", strings.Join(loaded, ", "))
 		}
-		if err := runConsume(command, options, stdout); err != nil {
+		if err := runConsume(command, options, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
@@ -150,7 +150,7 @@ func parseConsumeOptions(command string, args []string, stderr io.Writer) (consu
 	return options, -1
 }
 
-func runConsume(command string, options consumeOptions, stdout io.Writer) error {
+func runConsume(command string, options consumeOptions, stdout, stderr io.Writer) error {
 	settings, err := config.KafkaFromEnv(options.groupID)
 	if err != nil {
 		return err
@@ -178,8 +178,8 @@ func runConsume(command string, options consumeOptions, stdout io.Writer) error 
 	if fromMS != nil && toMS != nil && *fromMS > *toMS {
 		return fmt.Errorf("--from-time must not be after --to-time")
 	}
-	deserializer := decode.New(options.topic, options.keyFormat, options.valueFormat, config.SchemaRegistryFromEnv(), options.verbose)
-	consumer, err := kafkaclient.New(settings, options.topic, deserializer, fromMS, toMS, options.idlePolls, options.verbose)
+	deserializer := decode.New(options.topic, options.keyFormat, options.valueFormat, config.SchemaRegistryFromEnv(), options.verbose, stderr)
+	consumer, err := kafkaclient.New(settings, options.topic, deserializer, fromMS, toMS, options.idlePolls, options.verbose, stderr)
 	if err != nil {
 		return err
 	}

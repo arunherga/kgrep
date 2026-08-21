@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sort"
 	"strings"
@@ -27,11 +28,12 @@ type Consumer struct {
 	toMS         *int64
 	idlePolls    int
 	verbose      bool
+	diagnostics  io.Writer
 	pollTimeout  time.Duration
 	dialer       *kafka.Dialer
 }
 
-func New(settings config.KafkaSettings, topic string, deserializer *decode.Deserializer, fromMS, toMS *int64, idlePolls int, verbose bool) (*Consumer, error) {
+func New(settings config.KafkaSettings, topic string, deserializer *decode.Deserializer, fromMS, toMS *int64, idlePolls int, verbose bool, diagnostics io.Writer) (*Consumer, error) {
 	dialer, err := newDialer(settings)
 	if err != nil {
 		return nil, err
@@ -39,7 +41,7 @@ func New(settings config.KafkaSettings, topic string, deserializer *decode.Deser
 	if idlePolls < 1 {
 		return nil, fmt.Errorf("idle-polls must be at least 1")
 	}
-	return &Consumer{settings: settings, topic: topic, deserializer: deserializer, fromMS: fromMS, toMS: toMS, idlePolls: idlePolls, verbose: verbose, pollTimeout: time.Second, dialer: dialer}, nil
+	return &Consumer{settings: settings, topic: topic, deserializer: deserializer, fromMS: fromMS, toMS: toMS, idlePolls: idlePolls, verbose: verbose, diagnostics: diagnostics, pollTimeout: time.Second, dialer: dialer}, nil
 }
 
 func newDialer(settings config.KafkaSettings) (*kafka.Dialer, error) {
@@ -111,7 +113,7 @@ func (c *Consumer) Iterate(
 	}
 	sort.Ints(partitionIDs)
 	if c.verbose {
-		fmt.Printf("Topic %q partitions: %v\n", c.topic, partitionIDs)
+		fmt.Fprintf(c.diagnostics, "Topic %q partitions: %v\n", c.topic, partitionIDs)
 	}
 
 	processed := 0
@@ -123,7 +125,7 @@ func (c *Consumer) Iterate(
 		}
 		retainedTotal += max(bounds.high-bounds.low, 0)
 		if c.verbose {
-			fmt.Printf("Partition %d: low=%d high=%d retained=%d\n", partition, bounds.low, bounds.high, max(bounds.high-bounds.low, 0))
+			fmt.Fprintf(c.diagnostics, "Partition %d: low=%d high=%d retained=%d\n", partition, bounds.low, bounds.high, max(bounds.high-bounds.low, 0))
 		}
 		if bounds.low >= bounds.high {
 			continue
@@ -139,7 +141,7 @@ func (c *Consumer) Iterate(
 			return fmt.Errorf("set partition %d start offset: %w", partition, err)
 		}
 		if c.verbose {
-			fmt.Printf("Partition %d: scanning through offset %d\n", partition, bounds.high-1)
+			fmt.Fprintf(c.diagnostics, "Partition %d: scanning through offset %d\n", partition, bounds.high-1)
 		}
 
 		idle := 0
@@ -203,7 +205,7 @@ func (c *Consumer) Iterate(
 		}
 	}
 	if c.verbose {
-		fmt.Printf("Estimated retained messages across all partitions: %d\n", retainedTotal)
+		fmt.Fprintf(c.diagnostics, "Estimated retained messages across all partitions: %d\n", retainedTotal)
 	}
 	return nil
 }

@@ -74,3 +74,7 @@ Emitted: 248
 `Scanned` = good + bad. `Emitted` can be lower than `Good records` when a filter is active and most records don't match. `--max-messages` caps `Scanned`, including bad records — so a run can stop well before matching anything if most of what it reads is malformed.
 
 See [decoding.md](decoding.md) for what makes a record "bad," and [matching.md](matching.md) for how `Emitted` is decided.
+
+## Verbose diagnostics
+
+`--verbose` prints extra detail — partition discovery, per-partition watermarks, format-inference decisions, Schema Registry subject/version lookups — to **stderr**, separately from the emitted records and scan summary on stdout. That means `--verbose` is safe to combine with piping stdout elsewhere (e.g. redirecting it into a file): the diagnostic lines won't get mixed into the data.

@@ -1,6 +1,7 @@
 package kafkaclient
 
 import (
+	"io"
 	"testing"
 
 	"github.com/segmentio/kafka-go"
@@ -21,7 +22,7 @@ func TestNewDialerMapsSecuritySettings(t *testing.T) {
 }
 
 func TestDecodeMessageClassifiesValidRecordAsGood(t *testing.T) {
-	consumer := &Consumer{deserializer: decode.New("topic-a", "json", "json", config.SchemaRegistrySettings{}, false)}
+	consumer := &Consumer{deserializer: decode.New("topic-a", "json", "json", config.SchemaRegistrySettings{}, false, io.Discard)}
 	message := kafka.Message{Topic: "topic-a", Partition: 2, Offset: 17, Key: []byte(`{"id":"key-1"}`), Value: []byte(`{"id":"value-1"}`)}
 
 	decoded, bad := consumer.decodeMessage(message, nil)
@@ -35,7 +36,7 @@ func TestDecodeMessageClassifiesValidRecordAsGood(t *testing.T) {
 }
 
 func TestDecodeMessageReportsKeyAndValueFailuresAtLocation(t *testing.T) {
-	consumer := &Consumer{deserializer: decode.New("topic-a", "json", "json", config.SchemaRegistrySettings{}, false)}
+	consumer := &Consumer{deserializer: decode.New("topic-a", "json", "json", config.SchemaRegistrySettings{}, false, io.Discard)}
 	timestamp := int64(1234)
 	message := kafka.Message{Topic: "topic-a", Partition: 3, Offset: 42, Key: []byte(`{"broken"`), Value: []byte(`not-json`)}
 

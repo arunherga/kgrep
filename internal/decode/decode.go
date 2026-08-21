@@ -41,11 +41,12 @@ type Deserializer struct {
 	KeyFormat   string
 	ValueFormat string
 	Verbose     bool
+	Diagnostics io.Writer
 	registry    *RegistryClient
 }
 
-func New(topic, keyFormat, valueFormat string, settings config.SchemaRegistrySettings, verbose bool) *Deserializer {
-	return &Deserializer{Topic: topic, KeyFormat: keyFormat, ValueFormat: valueFormat, Verbose: verbose, registry: NewRegistryClient(settings)}
+func New(topic, keyFormat, valueFormat string, settings config.SchemaRegistrySettings, verbose bool, diagnostics io.Writer) *Deserializer {
+	return &Deserializer{Topic: topic, KeyFormat: keyFormat, ValueFormat: valueFormat, Verbose: verbose, Diagnostics: diagnostics, registry: NewRegistryClient(settings)}
 }
 
 func (d *Deserializer) DecodeKey(raw []byte) (any, string, error) {
@@ -61,7 +62,7 @@ func (d *Deserializer) decode(raw []byte, field, configured string) (any, string
 	if actual == "auto" {
 		actual = InferFormat(raw)
 		if d.Verbose {
-			fmt.Printf("Inferred %s format as %s\n", field, actual)
+			fmt.Fprintf(d.Diagnostics, "Inferred %s format as %s\n", field, actual)
 		}
 	}
 	if raw == nil {
@@ -89,7 +90,7 @@ func (d *Deserializer) decode(raw []byte, field, configured string) (any, string
 			if info, err := d.registry.LatestSubject(d.Topic + "-" + field); err != nil {
 				return nil, actual, err
 			} else {
-				fmt.Printf("Schema Registry subject %s: version=%d id=%d\n", info.Subject, info.Version, info.ID)
+				fmt.Fprintf(d.Diagnostics, "Schema Registry subject %s: version=%d id=%d\n", info.Subject, info.Version, info.ID)
 			}
 		}
 		codec, err := d.registry.Codec(schemaID)
