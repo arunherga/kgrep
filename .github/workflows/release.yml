@@ -59,7 +59,6 @@ jobs:
           mkdir -p dist
           out="dist/kgrep-${{ matrix.goos }}-${{ matrix.goarch }}${ext}"
           go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o "$out" ./cmd/kgrep
-          (cd dist && sha256sum "kgrep-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" > "kgrep-${{ matrix.goos }}-${{ matrix.goarch }}${ext}.sha256")
       - uses: actions/upload-artifact@v4
         with:
           name: kgrep-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -73,8 +72,56 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Generate checksums
+        run: (cd dist && sha256sum kgrep-* > checksums.txt)
+      - name: Write release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          base="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          cat > release-notes.md <<EOF
+          # kgrep ${TAG}
+
+          ## Linux
+          - [kgrep-linux-amd64](${base}/kgrep-linux-amd64)
+          - [kgrep-linux-arm64](${base}/kgrep-linux-arm64)
+
+          ## macOS
+          - [kgrep-darwin-amd64](${base}/kgrep-darwin-amd64) (Intel)
+          - [kgrep-darwin-arm64](${base}/kgrep-darwin-arm64) (Apple Silicon)
+
+          ## Windows
+          - [kgrep-windows-amd64.exe](${base}/kgrep-windows-amd64.exe)
+
+          ## Checksums
+          Verify your download against [checksums.txt](${base}/checksums.txt):
+          \`\`\`sh
+          sha256sum -c checksums.txt --ignore-missing
+          \`\`\`
+
+          ## Installation
+
+          ### Linux / macOS
+          \`\`\`sh
+          curl -fLO ${base}/kgrep-linux-amd64
+          chmod +x kgrep-linux-amd64
+          sudo mv kgrep-linux-amd64 /usr/local/bin/kgrep
+          \`\`\`
+
+          ### Windows (PowerShell)
+          \`\`\`powershell
+          Invoke-WebRequest -Uri ${base}/kgrep-windows-amd64.exe -OutFile kgrep.exe
+          \`\`\`
+
+          ## Usage
+          \`\`\`sh
+          kgrep --help
+          \`\`\`
+
+          Full install/verify instructions for every OS are in the [README](https://github.com/${{ github.repository }}#installing-in-detail).
+          EOF
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: release-notes.md
