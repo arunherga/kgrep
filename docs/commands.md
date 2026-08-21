@@ -24,7 +24,7 @@ kgrep --profile dev consume \
 - With `--allowed-keys-csv`, only records matching (per `--match-mode`, see [matching.md](matching.md)) are emitted.
 - With `--read-all` instead, every record is emitted regardless of the allowed-values set.
 - With neither, `consume` emits nothing (there's nothing to match against) — use `dump` or `--read-all` if you want everything.
-- Emitted records print to stdout unless `--output-csv` is given, in which case they're written there instead (not both — see the note below).
+- Emitted records always print to stdout, whether or not `--output-csv` is also given — `consume`/`print` are meant for watching matches happen live even while archiving them to CSV. `dump` is the one exception: when `--output-csv` is set, `dump` writes only to the CSV and stays silent on stdout, since a full-topic export could otherwise flood the terminal.
 
 ## `dump`
 

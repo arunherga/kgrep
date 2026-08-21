@@ -14,7 +14,6 @@ type KafkaSettings struct {
 	SASLMechanism    string
 	Username         string
 	Password         string
-	GroupID          string
 	DefaultTopic     string
 }
 
@@ -79,14 +78,10 @@ func loadDotEnv(path string, override bool) (bool, error) {
 	return true, nil
 }
 
-func KafkaFromEnv(groupOverride string) (KafkaSettings, error) {
+func KafkaFromEnv() (KafkaSettings, error) {
 	bootstrap := strings.TrimSpace(os.Getenv("KAFKA_BOOTSTRAP_SERVERS"))
 	if bootstrap == "" {
 		return KafkaSettings{}, fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS is required")
-	}
-	group := groupOverride
-	if group == "" {
-		group = getenv("KAFKA_GROUP_ID", "kgrep")
 	}
 	servers := make([]string, 0)
 	for _, server := range strings.Split(bootstrap, ",") {
@@ -99,7 +94,7 @@ func KafkaFromEnv(groupOverride string) (KafkaSettings, error) {
 		SecurityProtocol: getenv("KAFKA_SECURITY_PROTOCOL", "SASL_SSL"),
 		SASLMechanism:    getenv("KAFKA_SASL_MECHANISM", "PLAIN"),
 		Username:         os.Getenv("KAFKA_USERNAME"), Password: os.Getenv("KAFKA_PASSWORD"),
-		GroupID: group, DefaultTopic: os.Getenv("KAFKA_DEFAULT_TOPIC"),
+		DefaultTopic: os.Getenv("KAFKA_DEFAULT_TOPIC"),
 	}, nil
 }
 

@@ -31,11 +31,11 @@ func TestLoadEnvironmentProfileOverridesBase(t *testing.T) {
 
 func TestKafkaFromEnvValidatesAndSplitsBrokers(t *testing.T) {
 	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "broker-a:9092, broker-b:9092")
-	settings, err := KafkaFromEnv("custom-group")
+	settings, err := KafkaFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(settings.BootstrapServers, []string{"broker-a:9092", "broker-b:9092"}) || settings.GroupID != "custom-group" {
+	if !reflect.DeepEqual(settings.BootstrapServers, []string{"broker-a:9092", "broker-b:9092"}) {
 		t.Fatalf("unexpected settings: %#v", settings)
 	}
 }

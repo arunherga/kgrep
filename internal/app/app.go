@@ -27,7 +27,7 @@ const deliveryIdentifiers = "delivery-identifiers"
 
 type consumeOptions struct {
 	topic, allowedCSV, fromTime, toTime, outputCSV string
-	matchMode, keyFormat, valueFormat, groupID     string
+	matchMode, keyFormat, valueFormat              string
 	timezone                                       string
 	maxMessages, idlePolls                         int
 	readAll, printMatchesOnly, verbose             bool
@@ -115,7 +115,6 @@ func parseConsumeOptions(command string, args []string, stderr io.Writer) (consu
 	flags.Var(&options.shortcuts, "field-shortcut", "Field shortcut; repeatable (delivery-identifiers)")
 	flags.StringVar(&options.keyFormat, "key-format", "auto", "auto|json|avro|string|bytes")
 	flags.StringVar(&options.valueFormat, "value-format", "auto", "auto|json|avro|string|bytes")
-	flags.StringVar(&options.groupID, "group-id", "", "Kafka consumer group id")
 	flags.StringVar(&options.timezone, "timezone", "UTC", "Timezone for timestamps")
 	flags.BoolVar(&options.printMatchesOnly, "print-matches-only", false, "Print concise match summaries")
 	flags.IntVar(&options.idlePolls, "idle-polls", 30, "Consecutive idle polls before stopping")
@@ -152,7 +151,7 @@ func parseConsumeOptions(command string, args []string, stderr io.Writer) (consu
 }
 
 func runConsume(command string, options consumeOptions, stdout, stderr io.Writer) error {
-	settings, err := config.KafkaFromEnv(options.groupID)
+	settings, err := config.KafkaFromEnv()
 	if err != nil {
 		return err
 	}
@@ -213,7 +212,7 @@ func runConsume(command string, options consumeOptions, stdout, stderr io.Writer
 				return err
 			}
 		}
-		if command == "print" || command == "consume" || writer == nil {
+		if command != "dump" || writer == nil {
 			if options.printMatchesOnly {
 				fmt.Fprintln(stdout, formatMatchSummary(row))
 			} else {
