@@ -75,6 +75,38 @@ func TestDeserializerFetchesAndCachesConfluentAvroSchema(t *testing.T) {
 	}
 }
 
+func TestVerboseSubjectLookupFailureDoesNotFailDecode(t *testing.T) {
+	const schema = `{"type":"record","name":"Message","fields":[{"name":"id","type":"string"}]}`
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/subjects/") {
+			return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`)), Request: request}, nil
+		}
+		body := io.NopCloser(strings.NewReader(fmt.Sprintf(`{"schema":%q}`, schema)))
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: body, Request: request}, nil
+	})
+	codec, err := goavro.NewCodec(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := codec.BinaryFromNative(nil, map[string]any{"id": "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := make([]byte, 5, len(payload)+5)
+	binary.BigEndian.PutUint32(wire[1:], 7)
+	wire = append(wire, payload...)
+	var diagnostics bytes.Buffer
+	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{URL: "https://registry.example"}, true, &diagnostics)
+	deserializer.registry.http.Transport = transport
+	value, _, err := deserializer.DecodeValue(wire)
+	if err != nil || !reflect.DeepEqual(value, map[string]any{"id": "abc"}) {
+		t.Fatalf("expected successful decode despite subject-lookup failure: value=%#v err=%v", value, err)
+	}
+	if !strings.Contains(diagnostics.String(), "Schema Registry subject lookup failed") {
+		t.Fatalf("expected diagnostic about the failed lookup, got: %s", diagnostics.String())
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

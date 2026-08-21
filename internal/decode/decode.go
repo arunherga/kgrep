@@ -88,7 +88,7 @@ func (d *Deserializer) decode(raw []byte, field, configured string) (any, string
 		schemaID := binary.BigEndian.Uint32(raw[1:5])
 		if d.Verbose {
 			if info, err := d.registry.LatestSubject(d.Topic + "-" + field); err != nil {
-				return nil, actual, err
+				fmt.Fprintf(d.Diagnostics, "Schema Registry subject lookup failed for %s: %v\n", field, err)
 			} else {
 				fmt.Fprintf(d.Diagnostics, "Schema Registry subject %s: version=%d id=%d\n", info.Subject, info.Version, info.ID)
 			}

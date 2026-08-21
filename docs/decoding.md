@@ -30,7 +30,7 @@ Avro payloads must use Confluent's wire format: a `0x00` magic byte, followed by
 
 - `SCHEMA_REGISTRY_URL` (plus optional `SCHEMA_REGISTRY_USERNAME`/`PASSWORD` for basic auth) must be set for any `avro` decoding to work; without it, Avro records fail with a clear error rather than being silently skipped.
 - Each distinct schema ID is fetched once per process and cached after that — a long-running scan across many records with the same schema does not re-fetch it per record.
-- `--verbose` additionally looks up and prints the `<topic>-key` or `<topic>-value` subject's *latest* registered version and ID, for comparing against the schema ID actually seen on the wire (useful for spotting producers still writing an old schema version). This lookup is not cached and is not on the decode path — it only runs in verbose mode, once per record's key/value, purely as a diagnostic.
+- `--verbose` additionally looks up and prints the `<topic>-key` or `<topic>-value` subject's *latest* registered version and ID, for comparing against the schema ID actually seen on the wire (useful for spotting producers still writing an old schema version). This lookup is not cached and is not on the decode path — it only runs in verbose mode, once per record's key/value, purely as a diagnostic. If the lookup itself fails (e.g. the subject doesn't exist), that failure is printed as a diagnostic but does not fail the record — the record's good/bad status still depends only on whether the schema-ID-based decode itself succeeded.
 
 ## Bad records
 

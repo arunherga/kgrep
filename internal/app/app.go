@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,11 +130,11 @@ func parseConsumeOptions(command string, args []string, stderr io.Writer) (consu
 		fmt.Fprintf(stderr, "error: unexpected arguments: %s\n", strings.Join(flags.Args(), " "))
 		return options, 2
 	}
-	if !contains(filter.MatchModes, options.matchMode) {
+	if !slices.Contains(filter.MatchModes, options.matchMode) {
 		fmt.Fprintf(stderr, "error: invalid --match-mode %q\n", options.matchMode)
 		return options, 2
 	}
-	if !contains(decode.Formats, options.keyFormat) || !contains(decode.Formats, options.valueFormat) {
+	if !slices.Contains(decode.Formats, options.keyFormat) || !slices.Contains(decode.Formats, options.valueFormat) {
 		fmt.Fprintln(stderr, "error: --key-format and --value-format must be auto, json, avro, string, or bytes")
 		return options, 2
 	}
@@ -348,13 +349,4 @@ func FormatDuration(duration time.Duration) string {
 	}
 	hours := minutes / 60
 	return fmt.Sprintf("%dh %dm %.2fs", hours, minutes%60, remainder)
-}
-
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }

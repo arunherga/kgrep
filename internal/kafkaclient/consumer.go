@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"sort"
 	"strings"
 	"time"
@@ -271,9 +270,4 @@ func (c *Consumer) partitionBounds(ctx context.Context, partition int) (bounds, 
 		return bounds{}, fmt.Errorf("read partition %d high watermark: %w", partition, err)
 	}
 	return bounds{low: low, high: high}, nil
-}
-
-func IsNetworkError(err error) bool {
-	var networkError net.Error
-	return errors.As(err, &networkError)
 }

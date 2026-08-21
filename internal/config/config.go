@@ -86,7 +86,7 @@ func KafkaFromEnv(groupOverride string) (KafkaSettings, error) {
 	}
 	group := groupOverride
 	if group == "" {
-		group = getenv("KAFKA_GROUP_ID", "unified-kafka-cli")
+		group = getenv("KAFKA_GROUP_ID", "kgrep")
 	}
 	servers := make([]string, 0)
 	for _, server := range strings.Split(bootstrap, ",") {
