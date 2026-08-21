@@ -4,7 +4,7 @@ A Kafka consumer/inspector CLI written in Go, using a pure-Go Kafka client.
 
 ## Documentation
 
-- [docs/commands.md](docs/commands.md) — the four commands (`consume`/`dump`/`print`/`query`), output columns, the scan summary
+- [docs/commands.md](docs/commands.md) — the three commands (`consume`/`dump`/`print`), output columns, the scan summary
 - [docs/matching.md](docs/matching.md) — match modes, field paths, the `delivery-identifiers` shortcut
 - [docs/decoding.md](docs/decoding.md) — format inference, Avro/Schema Registry behavior, what makes a record "bad"
 - [docs/architecture.md](docs/architecture.md) — package responsibilities, data flow, key invariants, for anyone changing the code rather than just running it
@@ -14,7 +14,6 @@ A Kafka consumer/inspector CLI written in Go, using a pure-Go Kafka client.
 - `consume`: scan and filter records, optionally printing and/or writing CSV
 - `dump`: emit all records when no allowed-values file is supplied
 - `print`: print all records when no allowed-values file is supplied
-- `query`: filter a previously generated CSV by a selected key column
 - independent `auto`, `json`, `avro`, `string`, and `bytes` decoding for keys and values
 - Confluent wire-format Avro decoding through Schema Registry, with schema-ID caching
 - raw Kafka-key, decoded-key, decoded-value, key-or-value, and key-and-value matching
@@ -153,11 +152,6 @@ Shared values are loaded from `.env`. A command such as `--profile qa` then load
   --from-time 2026-04-13T00:00:00Z \
   --to-time 2026-04-14T00:00:00Z \
   --output-csv kafka_dump.csv
-
-# Query an output CSV without connecting to Kafka
-./bin/kgrep query \
-  --input-csv kafka_dump.csv \
-  --allowed-keys-csv allowed_keys.csv
 ```
 
 Global options (`--env-file` and `--profile`) must appear before the command, matching the Python CLI. Command-specific options appear after it.

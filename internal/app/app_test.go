@@ -2,9 +2,6 @@ package app
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -43,23 +40,6 @@ func TestFormatBadRecordIncludesLocationAndSeparateErrors(t *testing.T) {
 	expected := "BAD topic-a[4]@99 key_error=invalid key JSON value_error=invalid value JSON"
 	if actual != expected {
 		t.Fatalf("got %q, want %q", actual, expected)
-	}
-}
-
-func TestRunQueryCommand(t *testing.T) {
-	directory := t.TempDir()
-	input := filepath.Join(directory, "input.csv")
-	allowed := filepath.Join(directory, "allowed.csv")
-	if err := os.WriteFile(input, []byte("topic,kafka_key\nt,wanted\nt,other\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(allowed, []byte("wanted\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	code := Run([]string{"query", "--input-csv", input, "--allowed-keys-csv", allowed}, &stdout, &stderr)
-	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"kafka_key":"wanted"`) || !strings.Contains(stdout.String(), "Matched rows: 1") {
-		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

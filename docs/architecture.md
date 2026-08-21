@@ -7,13 +7,13 @@ This is a map of how `kgrep` is put together, for anyone changing the code rathe
 | Package | Responsibility |
 |---|---|
 | `cmd/kgrep` | Entry point. Handles `--version` directly, otherwise hands off to `app.Run`. |
-| `internal/app` | CLI wiring: flag parsing for `consume`/`dump`/`print`/`query`, orchestrates a scan, formats rows for stdout/CSV. |
+| `internal/app` | CLI wiring: flag parsing for `consume`/`dump`/`print`, orchestrates a scan, formats rows for stdout/CSV. |
 | `internal/config` | `.env`/profile loading, `KafkaSettings` and `SchemaRegistrySettings` construction from environment variables. |
 | `internal/core` | Shared, transport-neutral types: `DecodedMessage`, `BadRecord`, `MatchResult`. No logic, just the vocabulary other packages share. |
 | `internal/kafkaclient` | Owns the Kafka connection: partition discovery, watermark snapshotting, bounded reads, SASL/TLS dialer setup. |
 | `internal/decode` | Turns raw key/value bytes into Go values: format inference, JSON, Avro (via Confluent wire format + Schema Registry), string, bytes. |
 | `internal/filter` | Match-mode evaluation against an allowed-values set, including dot-path field extraction. |
-| `internal/csvutil` | Allowed-values CSV loading, output CSV writing, the `query` command's CSV filtering, JSON-snippet formatting. |
+| `internal/csvutil` | Allowed-values CSV loading, output CSV writing, JSON-snippet formatting. |
 | `internal/timeutil` | Epoch/ISO-8601 parsing and timezone-aware formatting. |
 
 ## Data flow (`consume`/`dump`/`print`)
@@ -37,8 +37,6 @@ app.runConsume
                   → good? filter.Evaluate(...)   → MatchResult
                               → emit(DecodedMessage)  [app.RowForMessage → print / CSV row]
 ```
-
-`query` skips Kafka and the decoder entirely: `csvutil.Query` re-reads a previously written output CSV and filters it by a key column, so it needs no network access.
 
 ## Key invariants
 

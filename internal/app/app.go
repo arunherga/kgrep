@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -86,14 +85,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
-	case "query":
-		if err, parseCode := runQuery(commandArgs, stdout, stderr); parseCode >= 0 {
-			if err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-			}
-			return parseCode
-		}
-		return 0
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n", command)
 		printUsage(stderr)
@@ -103,7 +94,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "Unified Kafka consumer CLI (Go)")
-	fmt.Fprintln(output, "Usage: kafka-cli [--env-file PATH] [--profile NAME] <consume|dump|print|query> [options]")
+	fmt.Fprintln(output, "Usage: kgrep [--env-file PATH] [--profile NAME] <consume|dump|print> [options]")
 }
 
 func parseConsumeOptions(command string, args []string, stderr io.Writer) (consumeOptions, int) {
@@ -273,54 +264,6 @@ func FormatBadRecord(record core.BadRecord) string {
 
 func singleLine(value string) string {
 	return strings.Join(strings.Fields(value), " ")
-}
-
-func runQuery(args []string, stdout, stderr io.Writer) (error, int) {
-	flags := flag.NewFlagSet("query", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	input := flags.String("input-csv", "", "Input CSV path")
-	allowedPath := flags.String("allowed-keys-csv", "", "Allowed-values CSV path")
-	keyColumn := flags.String("key-column", "kafka_key", "Key column name")
-	output := flags.String("output-csv", "", "Optional output CSV path")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil, 0
-		}
-		return err, 2
-	}
-	if *input == "" || *allowedPath == "" {
-		return fmt.Errorf("--input-csv and --allowed-keys-csv are required"), 2
-	}
-	allowed, err := csvutil.LoadAllowedValues(*allowedPath)
-	if err != nil {
-		return err, 1
-	}
-	rows, err := csvutil.Query(*input, allowed, *keyColumn)
-	if err != nil {
-		return err, 1
-	}
-	if *output != "" {
-		writer, err := csvutil.NewResultWriter(*output)
-		if err != nil {
-			return err, 1
-		}
-		for _, row := range rows {
-			if err := writer.Write(row); err != nil {
-				writer.Close()
-				return err, 1
-			}
-		}
-		if err := writer.Close(); err != nil {
-			return err, 1
-		}
-	} else {
-		for _, row := range rows {
-			encoded, _ := json.Marshal(row)
-			fmt.Fprintln(stdout, string(encoded))
-		}
-	}
-	fmt.Fprintf(stdout, "Matched rows: %d\n", len(rows))
-	return nil, -1
 }
 
 func resolvePaths(options consumeOptions) ([]string, []string) {

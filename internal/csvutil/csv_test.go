@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func TestLoadAllowedValuesTrimsDeduplicatesAndIgnoresEmpty(t *testing.T) {
 	}
 }
 
-func TestResultWriterAndQueryRoundTrip(t *testing.T) {
+func TestResultWriterWritesHeaderAndRows(t *testing.T) {
 	directory := t.TempDir()
 	input := filepath.Join(directory, "input.csv")
 	writer, err := NewResultWriter(input)
@@ -32,15 +33,18 @@ func TestResultWriterAndQueryRoundTrip(t *testing.T) {
 	if err := writer.Write(map[string]string{"topic": "topic", "kafka_key": "wanted"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.Write(map[string]string{"topic": "topic", "kafka_key": "other"}); err != nil {
-		t.Fatal(err)
-	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := Query(input, map[string]struct{}{"wanted": {}}, "kafka_key")
-	if err != nil || len(rows) != 1 || rows[0]["kafka_key"] != "wanted" {
-		t.Fatalf("rows=%#v err=%v", rows, err)
+	contents, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(contents), strings.Join(FieldNames, ",")+"\n") {
+		t.Fatalf("missing expected header: %s", contents)
+	}
+	if !strings.Contains(string(contents), "topic,,,,wanted,") {
+		t.Fatalf("missing expected row: %s", contents)
 	}
 }
 

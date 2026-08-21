@@ -1,6 +1,6 @@
 # Commands
 
-`kgrep` has four commands. Three (`consume`, `dump`, `print`) talk to Kafka; `query` only reads a CSV that a previous run wrote.
+`kgrep` has three commands, all of which read from Kafka: `consume`, `dump`, and `print`.
 
 Global options (`--env-file`, `--profile`) go **before** the command name; command-specific flags go after it:
 
@@ -45,16 +45,6 @@ Identical semantics to `dump` (auto-read-all when no allowed-values file), excep
 ```sh
 kgrep print --topic orders-crud --print-matches-only
 ```
-
-## `query`
-
-Filters a CSV that `--output-csv` already wrote, by a key column — no Kafka connection, no credentials needed:
-
-```sh
-kgrep query --input-csv day_dump.csv --allowed-keys-csv order_ids.csv --key-column kafka_key
-```
-
-Useful for slicing an existing dump multiple ways without re-scanning the topic. `--key-column` defaults to `kafka_key`; point it at any column from the [output CSV](#output-columns) — e.g. `decoded_value_json` if that's easier to grep a substring out of.
 
 ## Output columns
 

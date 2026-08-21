@@ -117,53 +117,6 @@ func (w *ResultWriter) Close() error {
 	return closeErr
 }
 
-func Query(path string, allowed map[string]struct{}, keyColumn string) ([]map[string]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open input CSV %q: %w", path, err)
-	}
-	defer file.Close()
-	reader := csv.NewReader(file)
-	headings, err := reader.Read()
-	if err != nil {
-		return nil, fmt.Errorf("read input CSV header: %w", err)
-	}
-	keyIndex := -1
-	for index, heading := range headings {
-		if heading == keyColumn {
-			keyIndex = index
-			break
-		}
-	}
-	if keyIndex < 0 {
-		return []map[string]string{}, nil
-	}
-	rows := make([]map[string]string, 0)
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read input CSV: %w", err)
-		}
-		if keyIndex >= len(record) {
-			continue
-		}
-		if _, ok := allowed[strings.TrimSpace(record[keyIndex])]; !ok {
-			continue
-		}
-		row := make(map[string]string, len(headings))
-		for index, heading := range headings {
-			if index < len(record) {
-				row[heading] = record[index]
-			}
-		}
-		rows = append(rows, row)
-	}
-	return rows, nil
-}
-
 func SortedSet(values map[string]struct{}) []string {
 	result := make([]string, 0, len(values))
 	for value := range values {
