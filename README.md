@@ -2,7 +2,12 @@
 
 A Kafka consumer/inspector CLI written in Go, using a pure-Go Kafka client.
 
-See [docs/architecture.md](docs/architecture.md) for how the code is put together (package responsibilities, data flow, key invariants) if you're changing rather than just running it.
+## Documentation
+
+- [docs/commands.md](docs/commands.md) — the four commands (`consume`/`dump`/`print`/`query`), output columns, the scan summary
+- [docs/matching.md](docs/matching.md) — match modes, field paths, the `delivery-identifiers` shortcut
+- [docs/decoding.md](docs/decoding.md) — format inference, Avro/Schema Registry behavior, what makes a record "bad"
+- [docs/architecture.md](docs/architecture.md) — package responsibilities, data flow, key invariants, for anyone changing the code rather than just running it
 
 ## Functionality
 
