@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -20,10 +22,12 @@ import (
 	"kgrep/internal/decode"
 	"kgrep/internal/filter"
 	"kgrep/internal/kafkaclient"
+	"kgrep/internal/selfupdate"
 	"kgrep/internal/timeutil"
 )
 
 const deliveryIdentifiers = "delivery-identifiers"
+const skipUpdateCheckEnv = "KGREP_SKIP_UPDATE_CHECK"
 
 type consumeOptions struct {
 	topic, allowedCSV, fromTime, toTime, outputCSV string
@@ -42,14 +46,17 @@ func (values *stringList) Set(value string) error {
 	return nil
 }
 
-func Run(args []string, stdout, stderr io.Writer) int {
+func Run(version string, args []string, stdout, stderr io.Writer) int {
 	started := time.Now()
-	code := run(args, stdout, stderr)
+	command, code := run(version, args, stdout, stderr)
 	fmt.Fprintf(stdout, "Total runtime: %s\n", FormatDuration(time.Since(started)))
+	if command != "update" {
+		checkForUpdate(selfupdate.New(), version, stderr)
+	}
 	return code
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+func run(version string, args []string, stdout, stderr io.Writer) (string, int) {
 	global := flag.NewFlagSet("kgrep", flag.ContinueOnError)
 	global.SetOutput(stderr)
 	envFile := global.String("env-file", ".env", "Path to .env file")
@@ -57,45 +64,128 @@ func run(args []string, stdout, stderr io.Writer) int {
 	global.Usage = func() { printUsage(stderr) }
 	if err := global.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0
+			return "", 0
 		}
-		return 2
+		return "", 2
 	}
 	remaining := global.Args()
 	if len(remaining) == 0 {
 		printUsage(stderr)
-		return 2
+		return "", 2
+	}
+	command, commandArgs := remaining[0], remaining[1:]
+	if command == "update" {
+		return command, runUpdate(selfupdate.New(), version, selfupdate.ReplaceExecutable, stdout, stderr)
 	}
 	loaded, err := config.LoadEnvironment(*envFile, *profile)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
+		return command, 1
 	}
-	command, commandArgs := remaining[0], remaining[1:]
 	switch command {
 	case "consume", "dump", "print":
 		options, parseCode := parseConsumeOptions(command, commandArgs, stderr)
 		if parseCode >= 0 {
-			return parseCode
+			return command, parseCode
 		}
 		if options.verbose && len(loaded) > 0 {
 			fmt.Fprintf(stdout, "Loaded environment files: %s\n", strings.Join(loaded, ", "))
 		}
 		if err := runConsume(command, options, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
+			return command, 1
 		}
-		return 0
+		return command, 0
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n", command)
 		printUsage(stderr)
-		return 2
+		return command, 2
 	}
 }
 
 func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "Unified Kafka consumer CLI (Go)")
-	fmt.Fprintln(output, "Usage: kgrep [--env-file PATH] [--profile NAME] <consume|dump|print> [options]")
+	fmt.Fprintln(output, "Usage: kgrep [--env-file PATH] [--profile NAME] <consume|dump|print|update> [options]")
+}
+
+// runUpdate downloads and installs the newest published release in place of
+// the currently running executable.
+func runUpdate(client *selfupdate.Client, version string, install func(path string, content []byte) error, stdout, stderr io.Writer) int {
+	if version == "dev" {
+		fmt.Fprintln(stderr, "error: kgrep update is not available for development builds; download a release directly from https://github.com/"+selfupdate.Repo+"/releases/latest")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	fmt.Fprintln(stdout, "Checking for updates...")
+	release, err := client.Latest(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: check for the latest release: %v\n", err)
+		return 1
+	}
+	if !selfupdate.IsNewer(version, release.Tag) {
+		fmt.Fprintf(stdout, "kgrep is already up to date (%s).\n", version)
+		return 0
+	}
+
+	assetName := selfupdate.AssetName(runtime.GOOS, runtime.GOARCH)
+	asset, ok := selfupdate.FindAsset(release, assetName)
+	if !ok {
+		fmt.Fprintf(stderr, "error: %s has no release asset for %s/%s\n", release.Tag, runtime.GOOS, runtime.GOARCH)
+		return 1
+	}
+	checksumsAsset, ok := selfupdate.FindAsset(release, "checksums.txt")
+	if !ok {
+		fmt.Fprintf(stderr, "error: %s is missing checksums.txt\n", release.Tag)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Downloading kgrep %s for %s/%s...\n", release.Tag, runtime.GOOS, runtime.GOARCH)
+	binary, err := client.Download(ctx, asset.URL)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: download %s: %v\n", assetName, err)
+		return 1
+	}
+	checksums, err := client.Download(ctx, checksumsAsset.URL)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: download checksums.txt: %v\n", err)
+		return 1
+	}
+	if err := selfupdate.VerifyChecksum(binary, assetName, checksums); err != nil {
+		fmt.Fprintf(stderr, "error: %v; aborting update\n", err)
+		return 1
+	}
+
+	executablePath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: locate the running executable: %v\n", err)
+		return 1
+	}
+	if err := install(executablePath, binary); err != nil {
+		fmt.Fprintf(stderr, "error: install update: %v (you may need to re-run with elevated permissions, or download manually from https://github.com/%s/releases/latest)\n", err, selfupdate.Repo)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Updated kgrep %s -> %s.\n", version, release.Tag)
+	return 0
+}
+
+// checkForUpdate silently checks for a newer release and prints a one-line
+// notice if one is available. Any failure (offline, rate-limited, etc.) is
+// swallowed so it never disrupts the command that was actually requested.
+func checkForUpdate(client *selfupdate.Client, version string, stderr io.Writer) {
+	if version == "dev" || os.Getenv(skipUpdateCheckEnv) != "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	release, err := client.Latest(ctx)
+	if err != nil {
+		return
+	}
+	if selfupdate.IsNewer(version, release.Tag) {
+		fmt.Fprintf(stderr, "\nA newer version of kgrep is available: %s (you have %s). Run 'kgrep update' to upgrade.\n", release.Tag, version)
+	}
 }
 
 func parseConsumeOptions(command string, args []string, stderr io.Writer) (consumeOptions, int) {

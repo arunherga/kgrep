@@ -15,5 +15,5 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	os.Exit(app.Run(args, os.Stdout, os.Stderr))
+	os.Exit(app.Run(version, args, os.Stdout, os.Stderr))
 }

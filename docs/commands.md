@@ -1,6 +1,6 @@
 # Commands
 
-`kgrep` has three commands, all of which read from Kafka: `consume`, `dump`, and `print`.
+`kgrep` has four commands: `consume`, `dump`, and `print` read from Kafka; `update` upgrades kgrep itself and doesn't touch Kafka at all.
 
 Global options (`--env-file`, `--profile`) go **before** the command name; command-specific flags go after it:
 
@@ -45,6 +45,34 @@ Identical semantics to `dump` (auto-read-all when no allowed-values file), excep
 ```sh
 kgrep print --topic orders-crud --print-matches-only
 ```
+
+## `update`
+
+Downloads the latest release for your OS/architecture, verifies its checksum against `checksums.txt`, and replaces the currently running `kgrep` binary with it — no manual download needed:
+
+```sh
+kgrep update
+```
+
+```text
+Checking for updates...
+Downloading kgrep v2.1.0 for linux/amd64...
+Updated kgrep v2.0.1 -> v2.1.0.
+```
+
+If you're already on the latest version, it says so and exits without changing anything. `update` isn't available for locally built development binaries (version `dev`) — build a new one from source instead, or grab a release from the [Releases page](https://github.com/arunherga/kgrep/releases/latest).
+
+If kgrep is installed somewhere that needs elevated permissions to write to (e.g. `/usr/local/bin`), run it with `sudo`/as Administrator, or download and replace the binary manually.
+
+### The "newer version available" notice
+
+Every other command also checks for a newer release in the background and, if one exists, prints a one-line notice to stderr after it finishes:
+
+```text
+A newer version of kgrep is available: v2.1.0 (you have v2.0.1). Run 'kgrep update' to upgrade.
+```
+
+This check has a 2-second timeout and never fails or delays the command it's attached to — if you're offline, rate-limited, or otherwise can't reach GitHub, it's silently skipped. Set `KGREP_SKIP_UPDATE_CHECK=1` to disable it entirely (useful in scripts/CI, or restricted networks where the outbound call itself is unwanted).
 
 ## Output columns
 

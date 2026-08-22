@@ -7,7 +7,7 @@ This is a map of how `kgrep` is put together, for anyone changing the code rathe
 | Package | Responsibility |
 |---|---|
 | `cmd/kgrep` | Entry point. Handles `--version` directly, otherwise hands off to `app.Run`. |
-| `internal/app` | CLI wiring: flag parsing for `consume`/`dump`/`print`, orchestrates a scan, formats rows for stdout/CSV. |
+| `internal/app` | CLI wiring: flag parsing for `consume`/`dump`/`print`/`update`, orchestrates a scan, formats rows for stdout/CSV. |
 | `internal/config` | `.env`/profile loading, `KafkaSettings` and `SchemaRegistrySettings` construction from environment variables. |
 | `internal/core` | Shared, transport-neutral types: `DecodedMessage`, `BadRecord`, `MatchResult`. No logic, just the vocabulary other packages share. |
 | `internal/kafkaclient` | Owns the Kafka connection: partition discovery, watermark snapshotting, bounded reads, SASL/TLS dialer setup. |
@@ -15,6 +15,7 @@ This is a map of how `kgrep` is put together, for anyone changing the code rathe
 | `internal/filter` | Match-mode evaluation against an allowed-values set, including dot-path field extraction. |
 | `internal/csvutil` | Allowed-values CSV loading, output CSV writing, JSON-snippet formatting. |
 | `internal/timeutil` | Epoch/ISO-8601 parsing and timezone-aware formatting. |
+| `internal/selfupdate` | GitHub release lookup, checksum verification, and safe in-place binary replacement for `kgrep update` and the passive update notice. |
 
 ## Data flow (`consume`/`dump`/`print`)
 
@@ -50,6 +51,8 @@ app.runConsume
 
 **Verbose diagnostics are injected, not global.** `decode.Deserializer` and `kafkaclient.Consumer` each take a `diagnostics io.Writer` at construction (`app.runConsume` passes `stderr`), and write through it rather than calling `fmt.Printf` directly. This matters for two reasons: it keeps stdout as pure data output (safe to pipe or redirect even with `--verbose` on), and it makes verbose behavior unit-testable (`TestVerboseDiagnosticsWriteToInjectedWriter` asserts against a `bytes.Buffer` instead of the real process stdout).
 
+**Self-update never touches disk from inside `internal/selfupdate` without an explicit caller decision.** `app.runUpdate` takes both a `*selfupdate.Client` and an `install func(path string, content []byte) error` as parameters rather than constructing them internally — production code passes `selfupdate.New()` and `selfupdate.ReplaceExecutable`, but tests substitute a fake HTTP transport and a no-op install function, so `TestRunUpdateDownloadsVerifiesAndInstalls` (`internal/app/app_test.go`) can exercise the entire check → download → checksum-verify pipeline without ever overwriting the real test binary. `ReplaceExecutable` itself (`internal/selfupdate/selfupdate.go`) handles the two platforms differently: on Windows, the running executable can't be overwritten directly, so it's renamed aside, the new binary is renamed into place, and the old one is restored if that second rename fails; on Unix, a straight `os.Rename` works because replacing a file that's currently mapped/executing is permitted. The passive per-run notice (`checkForUpdate`) and the `dev` version sentinel both short-circuit before any network call, so a locally built binary never nags about updates it has no way to compare against.
+
 **Schema Registry lookups are cached by schema ID, not by subject.** `RegistryClient.Codec` (`internal/decode/decode.go`) locks a `map[uint32]*goavro.Codec` under an `RWMutex` and only calls out to the registry on a cache miss. `LatestSubject` (used only in `--verbose` mode, to print the subject's current version alongside the schema ID actually on the wire) is a separate, uncached call and is not part of the hot decode path — it's diagnostic only.
 
 **Field paths and recursive matching are separate strategies, not a fallback chain.** `filter.FindAllowedValues` either walks the exact dot-separated paths given via `--key-field`/`--value-field` (`ExtractPath`, which follows a path through both maps and lists), or — if no paths are given — recursively searches the entire decoded payload (`collect`). Passing fields narrows the search; omitting them widens it. `scalarText` deliberately renders `nil`/`bool` the way Python's `str()` would (`"None"`, `"True"`, `"False"`) rather than Go's default, since the allowed-values CSVs this tool consumes were written against the original Python CLI's behavior.
@@ -63,6 +66,7 @@ app.runConsume
 Every package with logic worth protecting has unit tests colocated with it (`*_test.go`). Notably:
 - `internal/decode/decode_test.go` fakes the Schema Registry with a `http.RoundTripper` function type (`roundTripFunc`) rather than hitting a real registry, and asserts the schema is fetched once and then served from cache.
 - `internal/kafkaclient/consumer_test.go` tests `newDialer` (SASL/TLS config mapping) and `decodeMessage` (good/bad classification) directly, without a live broker — the network-facing parts of `Iterate` itself aren't unit-tested and are exercised only against a real cluster.
+- `internal/selfupdate/selfupdate_test.go` and `internal/app/app_test.go` fake the GitHub API the same way, and additionally exercise `ReplaceExecutable` for real against a throwaway file in `t.TempDir()` — never the actual test binary.
 
 CI (`.github/workflows/release.yml`) currently runs `go vet` and `go test -race` only as a release gate — triggered by pushing a `vX.Y.Z` tag on `main` — not on every commit or pull request. There is no continuous-integration workflow independent of cutting a release.
 

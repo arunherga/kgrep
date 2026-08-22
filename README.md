@@ -7,6 +7,7 @@ A command-line tool for looking inside a Kafka topic: search for specific record
 - **Search** a topic for records matching values you care about (an order ID, a customer ID, anything) — [`consume`](docs/commands.md)
 - **Export** everything in a topic to a CSV file you can open in Excel or Google Sheets — [`dump`](docs/commands.md)
 - **Watch** records scroll by live in your terminal, for a quick look — [`print`](docs/commands.md)
+- **Update itself** with one command when a new version comes out — no re-downloading by hand — [`update`](docs/commands.md#update)
 
 It automatically understands plain text, JSON, and Avro-encoded messages, and it tells you clearly when a record couldn't be read, instead of silently skipping it or crashing.
 
@@ -199,6 +200,24 @@ xattr -d com.apple.quarantine /usr/local/bin/kgrep
 ### Getting a specific version instead of the latest
 
 Every release is also available individually. Replace `latest` in the URLs above with a version tag, e.g. `.../releases/download/v1.0.0/kgrep-linux-amd64`, to install that exact version instead of always tracking the newest one.
+
+---
+
+## Staying up to date
+
+You never need to repeat the download steps above to upgrade. Whenever a newer version is out, kgrep tells you at the end of any command:
+
+```text
+A newer version of kgrep is available: v2.1.0 (you have v2.0.1). Run 'kgrep update' to upgrade.
+```
+
+Then just run:
+
+```sh
+kgrep update
+```
+
+kgrep downloads the right file for your computer, checks it against the published checksum, and replaces itself in place — no browser, no re-running the install steps. If you don't want the automatic notice (e.g. in a script or a restricted network), set `KGREP_SKIP_UPDATE_CHECK=1`.
 
 ---
 
