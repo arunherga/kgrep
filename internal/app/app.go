@@ -29,6 +29,14 @@ import (
 const deliveryIdentifiers = "delivery-identifiers"
 const skipUpdateCheckEnv = "KGREP_SKIP_UPDATE_CHECK"
 
+// defaultIdlePolls of 60 gives roughly 5 minutes of patience per partition
+// (each poll waits up to kafkaclient's pollTimeout, currently 5s) before a
+// scan concludes a partition is done. That's generous enough to survive the
+// throttling/latency seen against real Confluent Cloud clusters without
+// requiring --idle-polls on every run; --idle-polls still exists for topics
+// that need more.
+const defaultIdlePolls = 60
+
 type consumeOptions struct {
 	topic, allowedCSV, fromTime, toTime, outputCSV string
 	matchMode, keyFormat, valueFormat              string
@@ -197,7 +205,7 @@ func checkForUpdate(client *selfupdate.Client, version string, stderr io.Writer)
 }
 
 func parseConsumeOptions(command string, args []string, stderr io.Writer) (consumeOptions, int) {
-	options := consumeOptions{matchMode: "key-or-value", keyFormat: "auto", valueFormat: "auto", timezone: "UTC", idlePolls: 30}
+	options := consumeOptions{matchMode: "key-or-value", keyFormat: "auto", valueFormat: "auto", timezone: "UTC", idlePolls: defaultIdlePolls}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&options.topic, "topic", "", "Kafka topic; defaults to KAFKA_DEFAULT_TOPIC")
@@ -215,7 +223,7 @@ func parseConsumeOptions(command string, args []string, stderr io.Writer) (consu
 	flags.StringVar(&options.valueFormat, "value-format", "auto", "auto|json|avro|string|bytes")
 	flags.StringVar(&options.timezone, "timezone", "UTC", "Timezone for timestamps")
 	flags.BoolVar(&options.printMatchesOnly, "print-matches-only", false, "Print concise match summaries")
-	flags.IntVar(&options.idlePolls, "idle-polls", 30, "Consecutive idle polls before stopping")
+	flags.IntVar(&options.idlePolls, "idle-polls", defaultIdlePolls, "Consecutive idle polls before stopping (each poll waits several seconds, so this is minutes of patience, not seconds)")
 	flags.BoolVar(&options.verbose, "verbose", false, "Print metadata and format decisions")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -291,7 +299,8 @@ func runConsume(command string, options consumeOptions, stdout, stderr io.Writer
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	goodRecords, badRecords, emitted := 0, 0, 0
-	err = consumer.Iterate(ctx, options.maxMessages, func(message core.DecodedMessage) error {
+	var coverage []kafkaclient.PartitionCoverage
+	coverage, err = consumer.Iterate(ctx, options.maxMessages, func(message core.DecodedMessage) error {
 		goodRecords++
 		result, err := filter.Evaluate(message, allowed, options.matchMode, keyFields, valueFields)
 		if err != nil {
@@ -340,7 +349,34 @@ func runConsume(command string, options consumeOptions, stdout, stderr io.Writer
 		badRecords,
 		emitted,
 	)
+	writeCoverage(stdout, coverage)
 	return nil
+}
+
+// writeCoverage reports, per partition, whether the scan actually reached
+// the high watermark captured at start versus merely giving up on
+// --idle-polls — the only way to distinguish "nothing left to read" from
+// "gave up early" after the fact.
+func writeCoverage(stdout io.Writer, coverage []kafkaclient.PartitionCoverage) {
+	if len(coverage) == 0 {
+		return
+	}
+	incomplete := 0
+	for _, c := range coverage {
+		if !c.Complete() {
+			incomplete++
+		}
+	}
+	if incomplete == 0 {
+		fmt.Fprintf(stdout, "Partition coverage: %d/%d fully read (no messages missed)\n", len(coverage), len(coverage))
+		return
+	}
+	fmt.Fprintf(stdout, "Partition coverage: %d/%d fully read — %d partition(s) may have unread messages:\n", len(coverage)-incomplete, len(coverage), incomplete)
+	for _, c := range coverage {
+		if !c.Complete() {
+			fmt.Fprintf(stdout, "  partition %d: read up to offset %d of %d (%d message(s) potentially unread)\n", c.Partition, c.LastOffset, c.High, max(c.High-c.LastOffset, 0))
+		}
+	}
 }
 
 func FormatBadRecord(record core.BadRecord) string {

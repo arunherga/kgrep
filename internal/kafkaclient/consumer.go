@@ -8,6 +8,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -40,8 +41,18 @@ func New(settings config.KafkaSettings, topic string, deserializer *decode.Deser
 	if idlePolls < 1 {
 		return nil, fmt.Errorf("idle-polls must be at least 1")
 	}
-	return &Consumer{settings: settings, topic: topic, deserializer: deserializer, fromMS: fromMS, toMS: toMS, idlePolls: idlePolls, verbose: verbose, diagnostics: diagnostics, pollTimeout: time.Second, dialer: dialer}, nil
+	return &Consumer{settings: settings, topic: topic, deserializer: deserializer, fromMS: fromMS, toMS: toMS, idlePolls: idlePolls, verbose: verbose, diagnostics: diagnostics, pollTimeout: pollTimeout, dialer: dialer}, nil
 }
+
+// pollTimeout is both the reader's MaxWait (how long the broker may hold a fetch
+// request open waiting for data) and the duration of one "idle poll" for
+// --idle-polls bookkeeping. It must be generous enough that a single fetch
+// attempt survives a broker-side throttling delay rather than timing out and
+// immediately re-requesting: against a Confluent Cloud cluster enforcing a
+// consume-bandwidth quota, a too-short MaxWait (previously 1s) caused fetches
+// to time out and retry faster than the broker's throttle delay cleared,
+// starving partitions of data that was in fact still there.
+const pollTimeout = 5 * time.Second
 
 func newDialer(settings config.KafkaSettings) (*kafka.Dialer, error) {
 	dialer := &kafka.Dialer{Timeout: 10 * time.Second, DualStack: true, ClientID: "kgrep"}
@@ -77,14 +88,35 @@ func newDialer(settings config.KafkaSettings) (*kafka.Dialer, error) {
 	return dialer, nil
 }
 
+// PartitionCoverage reports how far a single partition's scan actually got,
+// so callers can tell "we stopped because we ran out of patience, not
+// because we ran out of data" apart from a deliberate, requested stop.
+type PartitionCoverage struct {
+	Partition  int
+	Low, High  int64
+	LastOffset int64 // next unread offset; equals High when the partition was fully read
+	Reason     string
+}
+
+// Complete reports whether this partition's stop point should be trusted as
+// "nothing left to read" rather than "gave up early." Only idle-timeout is
+// untrustworthy: it means --idle-polls elapsed before reaching High, which
+// can happen even though more (slower-arriving) data exists past that point.
+// Every other reason is either a real end (reached-high, empty) or a stop
+// the caller explicitly asked for (max-messages, to-time), so neither
+// indicates a missed message.
+func (p PartitionCoverage) Complete() bool {
+	return p.Reason != "idle-timeout"
+}
+
 func (c *Consumer) Iterate(
 	ctx context.Context,
 	maxMessages int,
 	emit func(core.DecodedMessage) error,
 	reportBad func(core.BadRecord) error,
-) error {
+) ([]PartitionCoverage, error) {
 	if len(c.settings.BootstrapServers) == 0 {
-		return fmt.Errorf("no Kafka bootstrap servers configured")
+		return nil, fmt.Errorf("no Kafka bootstrap servers configured")
 	}
 	var partitions []kafka.Partition
 	var err error
@@ -97,10 +129,10 @@ func (c *Consumer) Iterate(
 		lookupErrors = append(lookupErrors, fmt.Errorf("broker %s: %w", broker, err))
 	}
 	if err != nil {
-		return fmt.Errorf("load topic %q metadata: %w", c.topic, errors.Join(lookupErrors...))
+		return nil, fmt.Errorf("load topic %q metadata: %w", c.topic, errors.Join(lookupErrors...))
 	}
 	if len(partitions) == 0 {
-		return fmt.Errorf("topic %q not found or has no partitions", c.topic)
+		return nil, fmt.Errorf("topic %q not found or has no partitions", c.topic)
 	}
 	partitionIDs := make([]int, 0, len(partitions))
 	seen := make(map[int]struct{})
@@ -115,98 +147,180 @@ func (c *Consumer) Iterate(
 		fmt.Fprintf(c.diagnostics, "Topic %q partitions: %v\n", c.topic, partitionIDs)
 	}
 
-	processed := 0
-	retainedTotal := int64(0)
-	for _, partition := range partitionIDs {
-		bounds, err := c.partitionBounds(ctx, partition)
-		if err != nil {
-			return err
-		}
-		retainedTotal += max(bounds.high-bounds.low, 0)
-		if c.verbose {
-			fmt.Fprintf(c.diagnostics, "Partition %d: low=%d high=%d retained=%d\n", partition, bounds.low, bounds.high, max(bounds.high-bounds.low, 0))
-		}
-		if bounds.low >= bounds.high {
-			continue
-		}
-		reader := kafka.NewReader(kafka.ReaderConfig{Brokers: c.settings.BootstrapServers, Topic: c.topic, Partition: partition, MinBytes: 1, MaxBytes: 10e6, MaxWait: c.pollTimeout, Dialer: c.dialer})
-		if c.fromMS != nil {
-			if err := reader.SetOffsetAt(ctx, time.UnixMilli(*c.fromMS)); err != nil {
-				reader.Close()
-				return fmt.Errorf("find offset for partition %d at requested time: %w", partition, err)
-			}
-		} else if err := reader.SetOffset(bounds.low); err != nil {
-			reader.Close()
-			return fmt.Errorf("set partition %d start offset: %w", partition, err)
-		}
-		if c.verbose {
-			fmt.Fprintf(c.diagnostics, "Partition %d: scanning through offset %d\n", partition, bounds.high-1)
-		}
+	// Partitions are independent streams, so they're scanned concurrently rather than
+	// one-after-another: on a slow/flaky broker each partition can spend minutes sitting
+	// in idle-poll waits, and running them sequentially made that wait time additive
+	// across all partitions instead of overlapping.
+	groupCtx, cancelGroup := context.WithCancel(ctx)
+	defer cancelGroup()
 
-		idle := 0
-		for {
-			pollContext, cancel := context.WithTimeout(ctx, c.pollTimeout)
-			message, err := reader.FetchMessage(pollContext)
-			cancel()
-			if err != nil {
-				if errors.Is(err, context.DeadlineExceeded) {
-					idle++
-					if idle >= c.idlePolls {
-						break
-					}
-					continue
-				}
-				reader.Close()
-				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-					return ctx.Err()
-				}
-				return fmt.Errorf("read partition %d: %w", partition, err)
-			}
-			idle = 0
-			if message.Offset >= bounds.high {
-				break
-			}
-			var timestamp *int64
-			if !message.Time.IsZero() {
-				value := message.Time.UnixMilli()
-				timestamp = &value
-			}
-			if c.fromMS != nil && timestamp != nil && *timestamp < *c.fromMS {
-				continue
-			}
-			if c.toMS != nil && timestamp != nil && *timestamp > *c.toMS {
-				break
-			}
-			decoded, bad := c.decodeMessage(message, timestamp)
-			if bad != nil {
-				if reportBad != nil {
-					if err := reportBad(*bad); err != nil {
-						reader.Close()
-						return err
-					}
-				}
-			} else {
-				if err := emit(decoded); err != nil {
-					reader.Close()
-					return err
-				}
-			}
-			processed++
-			if message.Offset >= bounds.high-1 || (maxMessages > 0 && processed >= maxMessages) {
-				break
-			}
+	var (
+		mu            sync.Mutex // serializes emit/reportBad calls and guards processed/retainedTotal/coverage
+		processed     int
+		retainedTotal int64
+		firstErr      error
+		coverage      []PartitionCoverage
+	)
+	recordErr := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
 		}
-		if err := reader.Close(); err != nil {
-			return fmt.Errorf("close partition %d reader: %w", partition, err)
-		}
-		if maxMessages > 0 && processed >= maxMessages {
-			break
-		}
+		mu.Unlock()
+		cancelGroup()
 	}
+
+	var wg sync.WaitGroup
+	for _, partition := range partitionIDs {
+		wg.Add(1)
+		go func(partition int) {
+			defer wg.Done()
+			partitionCoverage, err := c.iteratePartition(groupCtx, partition, maxMessages, &mu, &processed, cancelGroup, emit, reportBad)
+			mu.Lock()
+			retainedTotal += max(partitionCoverage.High-partitionCoverage.Low, 0)
+			coverage = append(coverage, partitionCoverage)
+			mu.Unlock()
+			if err != nil {
+				recordErr(err)
+			}
+		}(partition)
+	}
+	wg.Wait()
+
+	sort.Slice(coverage, func(i, j int) bool { return coverage[i].Partition < coverage[j].Partition })
+
 	if c.verbose {
 		fmt.Fprintf(c.diagnostics, "Estimated retained messages across all partitions: %d\n", retainedTotal)
 	}
-	return nil
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return coverage, nil
+}
+
+// iteratePartition scans a single partition end-to-end. emit/reportBad, the shared
+// processed counter, and diagnostics writes are only ever touched with mu held, since
+// this runs concurrently with the same call for every other partition in the topic.
+func (c *Consumer) iteratePartition(
+	ctx context.Context,
+	partition int,
+	maxMessages int,
+	mu *sync.Mutex,
+	processed *int,
+	stopAll func(),
+	emit func(core.DecodedMessage) error,
+	reportBad func(core.BadRecord) error,
+) (coverage PartitionCoverage, err error) {
+	bounds, err := c.partitionBounds(ctx, partition)
+	if err != nil {
+		return PartitionCoverage{Partition: partition}, err
+	}
+	coverage = PartitionCoverage{Partition: partition, Low: bounds.low, High: bounds.high, LastOffset: bounds.low}
+	if c.verbose {
+		mu.Lock()
+		fmt.Fprintf(c.diagnostics, "Partition %d: low=%d high=%d retained=%d\n", partition, bounds.low, bounds.high, max(bounds.high-bounds.low, 0))
+		mu.Unlock()
+	}
+	if bounds.low >= bounds.high {
+		coverage.Reason = "empty"
+		return coverage, nil
+	}
+
+	reader := kafka.NewReader(kafka.ReaderConfig{Brokers: c.settings.BootstrapServers, Topic: c.topic, Partition: partition, MinBytes: 1, MaxBytes: 10e6, MaxWait: c.pollTimeout, Dialer: c.dialer})
+	defer func() {
+		if closeErr := reader.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close partition %d reader: %w", partition, closeErr)
+		}
+	}()
+
+	if c.fromMS != nil {
+		if setErr := reader.SetOffsetAt(ctx, time.UnixMilli(*c.fromMS)); setErr != nil {
+			return coverage, fmt.Errorf("find offset for partition %d at requested time: %w", partition, setErr)
+		}
+	} else if setErr := reader.SetOffset(bounds.low); setErr != nil {
+		return coverage, fmt.Errorf("set partition %d start offset: %w", partition, setErr)
+	}
+	if c.verbose {
+		mu.Lock()
+		fmt.Fprintf(c.diagnostics, "Partition %d: scanning through offset %d\n", partition, bounds.high-1)
+		mu.Unlock()
+	}
+
+	idle := 0
+	for {
+		pollContext, cancel := context.WithTimeout(ctx, c.pollTimeout)
+		message, fetchErr := reader.FetchMessage(pollContext)
+		cancel()
+		if fetchErr != nil {
+			if errors.Is(fetchErr, context.DeadlineExceeded) {
+				idle++
+				if idle >= c.idlePolls {
+					coverage.Reason = "idle-timeout"
+					return coverage, nil
+				}
+				continue
+			}
+			if errors.Is(fetchErr, context.Canceled) {
+				// ctx was canceled by another partition's error, a global
+				// maxMessages cap, or the caller (e.g. SIGINT) — not this
+				// partition's own failure, so it reports no error itself.
+				coverage.Reason = "canceled"
+				return coverage, nil
+			}
+			return coverage, fmt.Errorf("read partition %d: %w", partition, fetchErr)
+		}
+		idle = 0
+		if message.Offset >= bounds.high {
+			coverage.Reason = "reached-high"
+			return coverage, nil
+		}
+		var timestamp *int64
+		if !message.Time.IsZero() {
+			value := message.Time.UnixMilli()
+			timestamp = &value
+		}
+		if c.fromMS != nil && timestamp != nil && *timestamp < *c.fromMS {
+			continue
+		}
+		if c.toMS != nil && timestamp != nil && *timestamp > *c.toMS {
+			coverage.Reason = "to-time"
+			return coverage, nil
+		}
+		decoded, bad := c.decodeMessage(message, timestamp)
+
+		mu.Lock()
+		var cbErr error
+		if bad != nil {
+			if reportBad != nil {
+				cbErr = reportBad(*bad)
+			}
+		} else {
+			cbErr = emit(decoded)
+		}
+		exceeded := false
+		if cbErr == nil {
+			*processed++
+			exceeded = maxMessages > 0 && *processed >= maxMessages
+		}
+		mu.Unlock()
+
+		if cbErr != nil {
+			return coverage, cbErr
+		}
+		coverage.LastOffset = message.Offset + 1
+		if exceeded {
+			stopAll()
+			coverage.Reason = "max-messages"
+			return coverage, nil
+		}
+		if message.Offset >= bounds.high-1 {
+			coverage.Reason = "reached-high"
+			return coverage, nil
+		}
+	}
 }
 
 func (c *Consumer) decodeMessage(message kafka.Message, timestamp *int64) (core.DecodedMessage, *core.BadRecord) {

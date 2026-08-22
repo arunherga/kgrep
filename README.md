@@ -67,12 +67,14 @@ Scanned: 250
 Good records: 248
 Bad records: 2
 Emitted: 248
+Partition coverage: 3/3 fully read (no messages missed)
 ```
 
 - **Scanned** — how many records it looked at in total.
 - **Good records** — how many it could read successfully.
 - **Bad records** — how many it couldn't read (shown above the summary, with the reason and exact location — this doesn't stop the scan).
 - **Emitted** — how many were actually shown to you (lower than "Good records" if you searched for specific values and most records didn't match).
+- **Partition coverage** — whether the scan can be trusted as complete. If it says fewer than "fully read," some partition gave up waiting for more data before reaching the end — rerun with a higher `--idle-polls` if that matters for what you're doing.
 
 ---
 

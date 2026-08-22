@@ -125,10 +125,11 @@ type RegistryClient struct {
 	http     *http.Client
 	mu       sync.RWMutex
 	codecs   map[uint32]*goavro.Codec
+	subjects map[string]SubjectInfo
 }
 
 func NewRegistryClient(settings config.SchemaRegistrySettings) *RegistryClient {
-	return &RegistryClient{settings: settings, http: &http.Client{Timeout: 15 * time.Second}, codecs: make(map[uint32]*goavro.Codec)}
+	return &RegistryClient{settings: settings, http: &http.Client{Timeout: 15 * time.Second}, codecs: make(map[uint32]*goavro.Codec), subjects: make(map[string]SubjectInfo)}
 }
 
 func (c *RegistryClient) Codec(id uint32) (*goavro.Codec, error) {
@@ -159,6 +160,12 @@ func (c *RegistryClient) Codec(id uint32) (*goavro.Codec, error) {
 }
 
 func (c *RegistryClient) LatestSubject(subject string) (SubjectInfo, error) {
+	c.mu.RLock()
+	info, ok := c.subjects[subject]
+	c.mu.RUnlock()
+	if ok {
+		return info, nil
+	}
 	var response struct {
 		Subject    string `json:"subject"`
 		Version    int    `json:"version"`
@@ -173,7 +180,11 @@ func (c *RegistryClient) LatestSubject(subject string) (SubjectInfo, error) {
 	if schemaType == "" {
 		schemaType = "AVRO"
 	}
-	return SubjectInfo{Subject: response.Subject, Version: response.Version, ID: response.ID, SchemaType: schemaType}, nil
+	info = SubjectInfo{Subject: response.Subject, Version: response.Version, ID: response.ID, SchemaType: schemaType}
+	c.mu.Lock()
+	c.subjects[subject] = info
+	c.mu.Unlock()
+	return info, nil
 }
 
 func (c *RegistryClient) get(path string, destination any) error {

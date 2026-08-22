@@ -152,9 +152,12 @@ Scanned: 250
 Good records: 248
 Bad records: 2
 Emitted: 248
+Partition coverage: 3/3 fully read (no messages missed)
 ```
 
 `Scanned` = good + bad. `Emitted` can be lower than `Good records` when a filter is active and most records don't match. `--max-messages` caps `Scanned`, including bad records — so a run can stop well before matching anything if most of what it reads is malformed.
+
+`Partition coverage` tells you whether to trust the scan as complete. Every partition stops for one of: reaching the end, `--max-messages`, `--to-time`, or running out of `--idle-polls` patience while data was possibly still arriving slower than that. Only the last one is untrustworthy, and it's the only thing that keeps a partition out of the "fully read" count — if any partition falls into it, the line names it along with the offset it actually reached, e.g. `partition 1: read up to offset 41234 of 44720 (3486 message(s) potentially unread)`. If you see that, rerun with a higher `--idle-polls`.
 
 See [decoding.md](decoding.md) for what makes a record "bad," and [matching.md](matching.md) for how `Emitted` is decided.
 
