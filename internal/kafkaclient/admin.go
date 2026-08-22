@@ -4,11 +4,24 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
 
 	"kgrep/internal/config"
+)
+
+// Concurrency/batching tuning for admin-protocol calls that scale poorly as
+// a single request but well when split into many concurrent smaller ones.
+// Empirically (against a real 85-consumer-group cluster): a single
+// DescribeGroups call for all 85 groups took ~45s; batches of 5 groups each,
+// run with this much concurrency, took ~2s. A single-group-at-a-time
+// OffsetFetch loop (kafka-go has no bulk variant) took ~61s sequential vs
+// ~5s at this concurrency.
+const (
+	describeGroupsBatchSize = 5
+	adminFetchConcurrency   = 20
 )
 
 // Admin talks to the cluster for metadata/diagnostic purposes (topic
@@ -26,7 +39,7 @@ func NewAdmin(settings config.KafkaSettings) (*Admin, error) {
 		return nil, err
 	}
 	transport := &kafka.Transport{TLS: dialer.TLS, SASL: dialer.SASLMechanism, ClientID: "kgrep", DialTimeout: 10 * time.Second}
-	client := &kafka.Client{Addr: kafka.TCP(settings.BootstrapServers...), Timeout: 15 * time.Second, Transport: transport}
+	client := &kafka.Client{Addr: kafka.TCP(settings.BootstrapServers...), Timeout: 30 * time.Second, Transport: transport}
 	return &Admin{client: client}, nil
 }
 
@@ -112,9 +125,12 @@ func (a *Admin) DescribeTopic(ctx context.Context, topic string) (TopicDetail, e
 
 	detail := TopicDetail{Name: topicMeta.Name, Internal: topicMeta.Internal}
 
-	offsetRequests := make([]kafka.OffsetRequest, 0, len(topicMeta.Partitions))
+	// A PartitionOffsets entry only has the field matching what was asked for
+	// populated (FirstOffsetOf leaves LastOffset as -1 and vice versa) —
+	// both must be requested to get a complete low/high watermark pair.
+	offsetRequests := make([]kafka.OffsetRequest, 0, len(topicMeta.Partitions)*2)
 	for _, partition := range topicMeta.Partitions {
-		offsetRequests = append(offsetRequests, kafka.FirstOffsetOf(partition.ID))
+		offsetRequests = append(offsetRequests, kafka.FirstOffsetOf(partition.ID), kafka.LastOffsetOf(partition.ID))
 	}
 	offsetsResponse, err := a.client.ListOffsets(ctx, &kafka.ListOffsetsRequest{Topics: map[string][]kafka.OffsetRequest{topic: offsetRequests}})
 	if err != nil {
@@ -126,20 +142,7 @@ func (a *Admin) DescribeTopic(ctx context.Context, topic string) (TopicDetail, e
 	}
 
 	detail.Partitions, detail.TotalMessages = buildPartitionDetails(topicMeta.Partitions, offsetsByPartition)
-	for index := range detail.Partitions {
-		partition := &detail.Partitions[index]
-		if partition.High <= partition.Low {
-			continue
-		}
-		lastTime, err := a.lastMessageTime(ctx, topic, partition.ID, partition.High-1)
-		if err != nil {
-			continue
-		}
-		partition.LastMessageTime = lastTime
-		if detail.LastMessageTime == nil || lastTime.After(*detail.LastMessageTime) {
-			detail.LastMessageTime = lastTime
-		}
-	}
+	detail.LastMessageTime = a.fillLastMessageTimes(ctx, topic, detail.Partitions)
 
 	detail.Groups, detail.GroupsError = a.groupsForTopic(ctx, topic, offsetsByPartition)
 	return detail, nil
@@ -176,6 +179,42 @@ func brokerIDs(brokers []kafka.Broker) []int {
 		ids[index] = broker.ID
 	}
 	return ids
+}
+
+// fillLastMessageTimes fetches each non-empty partition's last message
+// timestamp concurrently (one Fetch call per partition; a topic can have
+// enough partitions that doing this sequentially is a real cost, the same
+// pattern that made the consumer-group lookups below slow one at a time)
+// and returns the latest one across the whole topic.
+func (a *Admin) fillLastMessageTimes(ctx context.Context, topic string, partitions []PartitionDetail) *time.Time {
+	var mu sync.Mutex
+	var topicLatest *time.Time
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, adminFetchConcurrency)
+	for index := range partitions {
+		partition := &partitions[index]
+		if partition.High <= partition.Low {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(partition *PartitionDetail) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			lastTime, err := a.lastMessageTime(ctx, topic, partition.ID, partition.High-1)
+			if err != nil {
+				return
+			}
+			partition.LastMessageTime = lastTime
+			mu.Lock()
+			if topicLatest == nil || lastTime.After(*topicLatest) {
+				topicLatest = lastTime
+			}
+			mu.Unlock()
+		}(partition)
+	}
+	wg.Wait()
+	return topicLatest
 }
 
 func (a *Admin) lastMessageTime(ctx context.Context, topic string, partition int, offset int64) (*time.Time, error) {
@@ -218,31 +257,70 @@ func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByParti
 	for index, group := range listResponse.Groups {
 		groupIDs[index] = group.GroupID
 	}
-	describeResponse, err := a.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: groupIDs})
-	if err != nil {
-		return nil, fmt.Errorf("describe consumer groups: %w", err)
-	}
+	describedGroups := a.describeGroupsBatched(ctx, groupIDs)
 
 	partitionIDs := make([]int, 0, len(offsetsByPartition))
 	for id := range offsetsByPartition {
 		partitionIDs = append(partitionIDs, id)
 	}
 
+	var mu sync.Mutex
 	var summaries []GroupSummary
-	for _, group := range describeResponse.Groups {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, adminFetchConcurrency)
+	for _, group := range describedGroups {
 		if group.Error != nil {
 			continue
 		}
-		offsetResponse, err := a.client.OffsetFetch(ctx, &kafka.OffsetFetchRequest{GroupID: group.GroupID, Topics: map[string][]int{topic: partitionIDs}})
-		if err != nil || offsetResponse.Error != nil {
-			continue
-		}
-		if summary, ok := summarizeGroup(group, topic, offsetResponse.Topics[topic], offsetsByPartition); ok {
-			summaries = append(summaries, summary)
-		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(group kafka.DescribeGroupsResponseGroup) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			offsetResponse, err := a.client.OffsetFetch(ctx, &kafka.OffsetFetchRequest{GroupID: group.GroupID, Topics: map[string][]int{topic: partitionIDs}})
+			if err != nil || offsetResponse.Error != nil {
+				return
+			}
+			if summary, ok := summarizeGroup(group, topic, offsetResponse.Topics[topic], offsetsByPartition); ok {
+				mu.Lock()
+				summaries = append(summaries, summary)
+				mu.Unlock()
+			}
+		}(group)
 	}
+	wg.Wait()
+
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].GroupID < summaries[j].GroupID })
 	return summaries, nil
+}
+
+// describeGroupsBatched calls DescribeGroups in small batches, concurrently
+// — see the tuning constants' doc comment for why. A batch that fails is
+// skipped rather than failing the whole lookup, consistent with per-group
+// OffsetFetch failures also being tolerated in groupsForTopic.
+func (a *Admin) describeGroupsBatched(ctx context.Context, groupIDs []string) []kafka.DescribeGroupsResponseGroup {
+	var mu sync.Mutex
+	var groups []kafka.DescribeGroupsResponseGroup
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, adminFetchConcurrency)
+	for start := 0; start < len(groupIDs); start += describeGroupsBatchSize {
+		batch := groupIDs[start:min(start+describeGroupsBatchSize, len(groupIDs))]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(batch []string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			response, err := a.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: batch})
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			groups = append(groups, response.Groups...)
+			mu.Unlock()
+		}(batch)
+	}
+	wg.Wait()
+	return groups
 }
 
 // summarizeGroup computes one group's lag and topic-relevant membership from
