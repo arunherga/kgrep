@@ -249,3 +249,7 @@ Every tag pushed as `vX.Y.Z` on `main` automatically builds and publishes binari
 - Avro payloads must use Confluent's five-byte wire header. The schema ID in each message selects the writer schema; `--verbose` additionally reports the standard `<topic>-key` or `<topic>-value` subject's latest version.
 - `--max-messages 0` means unlimited. Negative limits and invalid time ranges are rejected early.
 - Deserialization failures never stop a scan — a record is counted "good" only if both its key and value decode successfully; failures are reported with their exact topic/partition/offset location and counted separately. See [docs/decoding.md](docs/decoding.md) for details.
+
+## License
+
+[MIT](LICENSE)
