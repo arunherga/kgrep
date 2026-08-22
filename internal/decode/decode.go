@@ -114,6 +114,10 @@ type SubjectInfo struct {
 	Subject string
 	Version int
 	ID      int
+	// SchemaType is AVRO, JSON, or PROTOBUF. Older Schema Registry versions
+	// that predate multi-format support omit this field entirely, in which
+	// case it defaults to "AVRO" (the only type they ever served).
+	SchemaType string
 }
 
 type RegistryClient struct {
@@ -156,15 +160,20 @@ func (c *RegistryClient) Codec(id uint32) (*goavro.Codec, error) {
 
 func (c *RegistryClient) LatestSubject(subject string) (SubjectInfo, error) {
 	var response struct {
-		Subject string `json:"subject"`
-		Version int    `json:"version"`
-		ID      int    `json:"id"`
+		Subject    string `json:"subject"`
+		Version    int    `json:"version"`
+		ID         int    `json:"id"`
+		SchemaType string `json:"schemaType"`
 	}
 	path := "/subjects/" + url.PathEscape(subject) + "/versions/latest"
 	if err := c.get(path, &response); err != nil {
 		return SubjectInfo{}, fmt.Errorf("could not load Schema Registry subject %q: %w", subject, err)
 	}
-	return SubjectInfo{Subject: response.Subject, Version: response.Version, ID: response.ID}, nil
+	schemaType := response.SchemaType
+	if schemaType == "" {
+		schemaType = "AVRO"
+	}
+	return SubjectInfo{Subject: response.Subject, Version: response.Version, ID: response.ID, SchemaType: schemaType}, nil
 }
 
 func (c *RegistryClient) get(path string, destination any) error {

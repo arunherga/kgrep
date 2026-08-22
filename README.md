@@ -7,6 +7,7 @@ A command-line tool for looking inside a Kafka topic: search for specific record
 - **Search** a topic for records matching values you care about (an order ID, a customer ID, anything) — [`consume`](docs/commands.md)
 - **Export** everything in a topic to a CSV file you can open in Excel or Google Sheets — [`dump`](docs/commands.md)
 - **Watch** records scroll by live in your terminal, for a quick look — [`print`](docs/commands.md)
+- **List every topic** in the cluster, and **inspect one topic in depth** — partitions, retained message count, last-write time, schema type, and every consumer group reading it with its lag — [`topics`/`describe-topic`](docs/commands.md#topics)
 - **Update itself** with one command when a new version comes out — no re-downloading by hand — [`update`](docs/commands.md#update)
 
 It automatically understands plain text, JSON, and Avro-encoded messages, and it tells you clearly when a record couldn't be read, instead of silently skipping it or crashing.

@@ -96,6 +96,14 @@ func run(version string, args []string, stdout, stderr io.Writer) (string, int) 
 			return command, 1
 		}
 		return command, 0
+	case "topics":
+		return command, runTopics(stdout, stderr)
+	case "describe-topic":
+		topicFlag, parseCode := parseDescribeTopicOptions(commandArgs, stderr)
+		if parseCode >= 0 {
+			return command, parseCode
+		}
+		return command, runDescribeTopic(topicFlag, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n", command)
 		printUsage(stderr)
@@ -105,7 +113,7 @@ func run(version string, args []string, stdout, stderr io.Writer) (string, int) 
 
 func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "Unified Kafka consumer CLI (Go)")
-	fmt.Fprintln(output, "Usage: kgrep [--env-file PATH] [--profile NAME] <consume|dump|print|update> [options]")
+	fmt.Fprintln(output, "Usage: kgrep [--env-file PATH] [--profile NAME] <consume|dump|print|topics|describe-topic|update> [options]")
 }
 
 // runUpdate downloads and installs the newest published release in place of

@@ -1,6 +1,6 @@
 # Commands
 
-`kgrep` has four commands: `consume`, `dump`, and `print` read from Kafka; `update` upgrades kgrep itself and doesn't touch Kafka at all.
+`kgrep` has six commands: `consume`, `dump`, and `print` read records from a topic; `topics` and `describe-topic` inspect cluster/topic metadata instead of reading records; `update` upgrades kgrep itself and doesn't touch Kafka at all.
 
 Global options (`--env-file`, `--profile`) go **before** the command name; command-specific flags go after it:
 
@@ -45,6 +45,61 @@ Identical semantics to `dump` (auto-read-all when no allowed-values file), excep
 ```sh
 kgrep print --topic orders-crud --print-matches-only
 ```
+
+## `topics`
+
+Lists every topic in the cluster, with its partition count and whether it's internal (like `__consumer_offsets`) or a regular topic:
+
+```sh
+kgrep topics
+```
+
+```text
+TOPIC                 PARTITIONS  TYPE
+__consumer_offsets    50          internal
+orders-crud           6           regular
+shipments-intransit   12          regular
+
+3 topic(s)
+```
+
+## `describe-topic`
+
+Everything kgrep can tell you about one topic — partition layout, retained message count, when it was last written to, its Schema Registry schema type (if configured), and every consumer group associated with it, active or not, with per-group lag:
+
+```sh
+kgrep describe-topic --topic orders-crud
+```
+
+```text
+Topic: orders-crud (regular)
+Partitions: 6
+Retained messages: 812345
+Last message written: 2026-04-13 18:22:04 UTC
+
+Schema:
+  key: (Schema Registry not configured)
+  value: (Schema Registry not configured)
+
+Partitions:
+ID     LEADER   REPLICAS         ISR                     LOW       HIGH   MESSAGES
+0      1        1,2,3            1,2,3                     0     135678     135678
+1      2        1,2,3            1,2,3                     0     140012     140012
+...
+
+Consumer groups:
+  billing-service [Stable, active] lag=142
+    - billing-1 @ /10.0.0.5 (partitions 0,1,2)
+    - billing-2 @ /10.0.0.6 (partitions 3,4,5)
+  reporting-batch [Empty, inactive] lag=812345
+```
+
+`--topic` defaults to `KAFKA_DEFAULT_TOPIC` like the other commands. A few things worth knowing about what this command can and can't tell you:
+
+- **"Retained messages" is not "total messages ever produced."** Like everywhere else in kgrep, this is `high watermark − low watermark` per partition — it reflects what's currently retained under your topic's retention/compaction settings, not history that's already aged out.
+- **"Inactive" means the group has committed offsets for this topic but no members right now** — it consumed from this topic at some point and stopped (crashed, scaled to zero, decommissioned), not that it's currently working slowly. An inactive group's lag just reflects how far behind its last commit is from the current high watermark.
+- **Schema type requires `SCHEMA_REGISTRY_URL`** to be set, same as Avro decoding elsewhere. Without it, both key and value show as "not configured" rather than being silently omitted.
+- **Two things Kafka's protocol doesn't expose at all, so kgrep can't report them:** which producer clients wrote to a topic (Kafka has no concept of "producer identity" that's queryable after the fact), and the topic's on-disk size in bytes (would require the `DescribeLogDirs` API, which the Kafka client library kgrep uses has never implemented in any release).
 
 ## `update`
 
