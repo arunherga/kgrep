@@ -292,6 +292,19 @@ func (c *Consumer) iteratePartition(
 		decoded, bad := c.decodeMessage(message, timestamp)
 
 		mu.Lock()
+		// Re-check the cap fresh under the lock, not just after processing our
+		// own message: another partition can have already pushed processed to
+		// maxMessages while this message was in flight (fetched/decoded before
+		// stopAll's cancellation reached this goroutine's next poll). Without
+		// this check, every partition with a message already in hand at the
+		// moment the cap is hit would still emit it, so --max-messages N could
+		// overshoot by up to (partition count - 1).
+		if maxMessages > 0 && *processed >= maxMessages {
+			mu.Unlock()
+			stopAll()
+			coverage.Reason = "max-messages"
+			return coverage, nil
+		}
 		var cbErr error
 		if bad != nil {
 			if reportBad != nil {
