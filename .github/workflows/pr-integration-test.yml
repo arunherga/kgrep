@@ -127,10 +127,27 @@ jobs:
 
       - name: Create an active consumer group (stays running, catches up to all 10)
         run: |
+          # docker exec -d is fire-and-forget: it returns as soon as the
+          # command is *launched* inside the container, not once the JVM has
+          # actually started and joined the group. A fixed sleep here raced
+          # with that startup time and lost — the group wasn't AT ITS actual
+          # first run, so poll for real evidence it joined instead of
+          # guessing how long that takes.
           docker exec -d kafka /opt/kafka/bin/kafka-console-consumer.sh \
             --topic kgrep-ci-group-test --bootstrap-server localhost:9092 \
             --group kgrep-ci-active-group --from-beginning
-          sleep 5
+          for i in $(seq 1 30); do
+            if docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+                 --bootstrap-server localhost:9092 --describe --group kgrep-ci-active-group 2>/dev/null \
+                 | grep -q kgrep-ci-active-group; then
+              echo "active group joined"
+              exit 0
+            fi
+            echo "waiting for active group to join... ($i/30)"
+            sleep 2
+          done
+          echo "active group never joined" >&2
+          exit 1
 
       - name: Assert — describe-topic reports both groups correctly
         run: |
