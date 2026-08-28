@@ -165,6 +165,18 @@ jobs:
           # moment.
           sleep 8
 
+      - name: Diagnostic — Kafka's own view of both groups
+        # Two runs in a row showed kgrep reporting the inactive group fine
+        # but never the active one, even after waiting for it to join and
+        # for its auto-commit interval to elapse. Before changing kgrep's
+        # code or guessing again, get direct evidence of what Kafka itself
+        # thinks this group's committed offset is right now.
+        run: |
+          docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+            --bootstrap-server localhost:9092 --describe --group kgrep-ci-active-group
+          docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+            --bootstrap-server localhost:9092 --describe --group kgrep-ci-inactive-group
+
       - name: Assert — describe-topic reports both groups correctly
         run: |
           ./kgrep-ci describe-topic --topic kgrep-ci-group-test | tee describe-after.out
