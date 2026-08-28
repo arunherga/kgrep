@@ -1,0 +1,105 @@
+name: PR Integration Test
+
+# Unit tests (go test) exercise decoding/matching/filtering logic against
+# hand-built structs, but nothing exercises kgrep against a real Kafka broker
+# in CI. This workflow does that on every PR: it stands up open-source Kafka
+# (KRaft mode, no Zookeeper needed), seeds a throwaway topic with known
+# messages, builds kgrep from the PR's own code, and runs real assertions
+# against real output.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Start Kafka (KRaft, single node)
+        run: |
+          CLUSTER_ID=$(docker run --rm apache/kafka:latest /opt/kafka/bin/kafka-storage.sh random-uuid)
+          docker run -d --name kafka -p 9092:9092 \
+            -e KAFKA_NODE_ID=1 \
+            -e CLUSTER_ID="$CLUSTER_ID" \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            apache/kafka:latest
+
+      - name: Wait for Kafka to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1; then
+              echo "Kafka is up"
+              exit 0
+            fi
+            echo "Waiting for Kafka... ($i/30)"
+            sleep 2
+          done
+          echo "Kafka never became ready" >&2
+          docker logs kafka
+          exit 1
+
+      - name: Create test topic and seed known messages
+        run: |
+          docker exec kafka /opt/kafka/bin/kafka-topics.sh --create \
+            --topic kgrep-ci-smoke-test --partitions 1 --replication-factor 1 \
+            --bootstrap-server localhost:9092
+
+          # 5 plain-string messages with predictable content, so the
+          # assertions below know exactly what to expect back.
+          printf 'hello-1\nhello-2\nhello-3\nhello-4\nhello-5\n' | \
+            docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+              --topic kgrep-ci-smoke-test --bootstrap-server localhost:9092
+
+      - name: Build kgrep from this PR's code
+        run: go build -o ./kgrep-ci ./cmd/kgrep
+
+      - name: Configure kgrep for the local test cluster
+        run: |
+          cat > .env <<EOF
+          KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+          KAFKA_SECURITY_PROTOCOL=PLAINTEXT
+          KAFKA_DEFAULT_TOPIC=kgrep-ci-smoke-test
+          EOF
+
+      - name: Assert — topics lists the seeded topic
+        run: |
+          ./kgrep-ci topics | tee topics.out
+          grep -q "kgrep-ci-smoke-test" topics.out
+
+      - name: Assert — describe-topic reports the right message count
+        run: |
+          ./kgrep-ci describe-topic --topic kgrep-ci-smoke-test | tee describe.out
+          grep -q "Retained messages: 5" describe.out
+
+      - name: Assert — dump reads exactly the seeded messages, no drops, full coverage
+        run: |
+          ./kgrep-ci dump --topic kgrep-ci-smoke-test --read-all --output-csv out.csv | tee dump.out
+          grep -q "Scanned: 5" dump.out
+          grep -q "Bad records: 0" dump.out
+          grep -q "Partition coverage: 1/1 fully read" dump.out
+          [ "$(tail -n +2 out.csv | wc -l)" -eq 5 ]
+          for i in 1 2 3 4 5; do grep -q "hello-$i" out.csv; done
+
+      - name: Assert — bad records are detected and counted, not silently dropped
+        run: |
+          # Forcing avro decoding on plain-string values makes every one of
+          # them fail — a deterministic way to exercise the bad-record path
+          # against a real broker instead of only hand-built test fixtures.
+          ./kgrep-ci consume --topic kgrep-ci-smoke-test --value-format avro --max-messages 5 | tee bad.out
+          grep -q "Bad records: 5" bad.out
+          grep -q "Good records: 0" bad.out
+
+      - name: Show Kafka logs on failure
+        if: failure()
+        run: docker logs kafka
