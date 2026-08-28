@@ -130,3 +130,36 @@ func TestAvroRequiresConfluentHeader(t *testing.T) {
 		t.Fatal("expected invalid wire header error")
 	}
 }
+
+func TestDeserializerDecodesJSONSchemaMessagesAsPlainJSON(t *testing.T) {
+	// Avro, JSON Schema, and Protobuf all share the identical Confluent wire
+	// header (magic byte + schema ID) — this confirms a JSON-Schema-typed
+	// schema ID is actually decoded as JSON rather than being misclassified
+	// as Avro and having its .proto/JSON-Schema text fail to compile as an
+	// Avro schema (the real bug this was regression-tested against).
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := io.NopCloser(strings.NewReader(`{"schema":"{\"type\":\"object\"}","schemaType":"JSON"}`))
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: body, Request: request}, nil
+	})
+	wire := append([]byte{0, 0, 0, 0, 99}, []byte(`{"id":"abc"}`)...)
+	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{URL: "https://registry.example"}, false, io.Discard)
+	deserializer.registry.http.Transport = transport
+	value, format, err := deserializer.DecodeValue(wire)
+	if err != nil || format != "json" || !reflect.DeepEqual(value, map[string]any{"id": "abc"}) {
+		t.Fatalf("value=%#v format=%s err=%v", value, format, err)
+	}
+}
+
+func TestDeserializerReportsProtobufAsUnsupportedInsteadOfMisdecoding(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := io.NopCloser(strings.NewReader(`{"schema":"syntax = \"proto3\";","schemaType":"PROTOBUF"}`))
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: body, Request: request}, nil
+	})
+	wire := []byte{0, 0, 0, 0, 5, 0xde, 0xad, 0xbe, 0xef}
+	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{URL: "https://registry.example"}, false, io.Discard)
+	deserializer.registry.http.Transport = transport
+	_, _, err := deserializer.DecodeValue(wire)
+	if err == nil || !strings.Contains(err.Error(), "PROTOBUF") || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("expected a clear PROTOBUF-unsupported error, got: %v", err)
+	}
+}
