@@ -100,6 +100,7 @@ Consumer groups:
 - **"Inactive" means the group has committed offsets for this topic but no members right now** — it consumed from this topic at some point and stopped (crashed, scaled to zero, decommissioned), not that it's currently working slowly. An inactive group's lag just reflects how far behind its last commit is from the current high watermark.
 - **Schema type requires `SCHEMA_REGISTRY_URL`** to be set, same as Avro decoding elsewhere. Without it, both key and value show as "not configured" rather than being silently omitted.
 - **Two things Kafka's protocol doesn't expose at all, so kgrep can't report them:** which producer clients wrote to a topic (Kafka has no concept of "producer identity" that's queryable after the fact), and the topic's on-disk size in bytes (would require the `DescribeLogDirs` API, which the Kafka client library kgrep uses has never implemented in any release).
+- **`--verbose` prints why a consumer group was left out of the report**, if any were: a group can fail to describe, fail to have its offsets fetched, or turn out to have no committed offset for this topic at all, and by default those are just silently excluded (transient per-group issues shouldn't sink the whole report). With `--verbose`, each exclusion prints a one-line reason to stderr instead of vanishing silently, e.g. `Group "reporting-batch": no committed offset for topic "orders-crud", excluding from report`.
 
 ## `update`
 
