@@ -3,9 +3,13 @@ name: PR Integration Test
 # Unit tests (go test) exercise decoding/matching/filtering logic against
 # hand-built structs, but nothing exercises kgrep against a real Kafka broker
 # in CI. This workflow does that on every PR: it stands up open-source Kafka
-# (KRaft mode, no Zookeeper needed), seeds a throwaway topic with known
-# messages, builds kgrep from the PR's own code, and runs real assertions
-# against real output.
+# (KRaft mode, no Zookeeper needed), seeds throwaway topics with known
+# messages and real consumer-group activity, builds kgrep from the PR's own
+# code, and runs real assertions against real output — covering every
+# command (topics, describe-topic, dump, consume, print, update),
+# consumer-group/lag reporting (both active and inactive), multi-partition
+# coverage, the --max-messages exactness guarantee, time-window filtering,
+# and bad-record detection.
 on:
   pull_request:
     branches: [main]
@@ -49,17 +53,42 @@ jobs:
           docker logs kafka
           exit 1
 
-      - name: Create test topic and seed known messages
+      - name: Create test topics
         run: |
+          # 3 partitions: exercises concurrent multi-partition scanning.
           docker exec kafka /opt/kafka/bin/kafka-topics.sh --create \
-            --topic kgrep-ci-smoke-test --partitions 1 --replication-factor 1 \
+            --topic kgrep-ci-smoke-test --partitions 3 --replication-factor 1 \
+            --bootstrap-server localhost:9092
+          # 1 partition, dedicated to consumer-group/lag tests: with a single
+          # partition, "consumed N of M" unambiguously means lag = M - N.
+          # Across 3 partitions that arithmetic isn't guaranteed — a group
+          # can be assigned all partitions but happen to read its first N
+          # messages from just one of them, so lag would reflect only that
+          # partition's backlog, not the naive total-minus-consumed value.
+          docker exec kafka /opt/kafka/bin/kafka-topics.sh --create \
+            --topic kgrep-ci-group-test --partitions 1 --replication-factor 1 \
             --bootstrap-server localhost:9092
 
-          # 5 plain-string messages with predictable content, so the
-          # assertions below know exactly what to expect back.
-          printf 'hello-1\nhello-2\nhello-3\nhello-4\nhello-5\n' | \
+      - name: Seed 9 keyed messages into the smoke-test topic
+        run: |
+          echo "BEFORE_PRODUCE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          # Every message gets a distinct key so the default hash partitioner
+          # spreads them across all 3 partitions instead of clustering them
+          # on one (which is what happens with null keys under Kafka's
+          # sticky-partitioner default).
+          printf 'key1:hello-1\nkey2:hello-2\nkey3:hello-3\nkey4:hello-4\nkey5:hello-5\nkey6:hello-6\nkey7:hello-7\nkey8:hello-8\nkey9:hello-9\n' | \
             docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
-              --topic kgrep-ci-smoke-test --bootstrap-server localhost:9092
+              --topic kgrep-ci-smoke-test --bootstrap-server localhost:9092 \
+              --property parse.key=true --property key.separator=:
+          sleep 2
+          echo "AFTER_PRODUCE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Seed 10 messages into the group-test topic
+        run: |
+          seq 1 10 | sed 's/^/msg-/' | \
+            docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+              --topic kgrep-ci-group-test --bootstrap-server localhost:9092
+          sleep 2
 
       - name: Build kgrep from this PR's code
         run: go build -o ./kgrep-ci ./cmd/kgrep
@@ -72,33 +101,96 @@ jobs:
           KAFKA_DEFAULT_TOPIC=kgrep-ci-smoke-test
           EOF
 
-      - name: Assert — topics lists the seeded topic
+      - name: Assert — topics lists both seeded topics
         run: |
           ./kgrep-ci topics | tee topics.out
           grep -q "kgrep-ci-smoke-test" topics.out
+          grep -q "kgrep-ci-group-test" topics.out
 
-      - name: Assert — describe-topic reports the right message count
+      - name: Assert — describe-topic reports the right count with no groups yet
         run: |
-          ./kgrep-ci describe-topic --topic kgrep-ci-smoke-test | tee describe.out
-          grep -q "Retained messages: 5" describe.out
+          ./kgrep-ci describe-topic --topic kgrep-ci-group-test | tee describe-before.out
+          grep -q "Retained messages: 10" describe-before.out
+          grep -q "(none)" describe-before.out
+
+      - name: Create an inactive consumer group (consumes 4 of 10, then exits)
+        run: |
+          docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+            --topic kgrep-ci-group-test --bootstrap-server localhost:9092 \
+            --group kgrep-ci-inactive-group --from-beginning --max-messages 4 \
+            --timeout-ms 30000 \
+            --consumer-property enable.auto.commit=true
+          # A clean KafkaConsumer.close() (which --max-messages triggers on
+          # reaching its count) sends an explicit LeaveGroup — this settles
+          # server-side before the assertion reads group state.
+          sleep 3
+
+      - name: Create an active consumer group (stays running, catches up to all 10)
+        run: |
+          docker exec -d kafka /opt/kafka/bin/kafka-console-consumer.sh \
+            --topic kgrep-ci-group-test --bootstrap-server localhost:9092 \
+            --group kgrep-ci-active-group --from-beginning
+          sleep 5
+
+      - name: Assert — describe-topic reports both groups correctly
+        run: |
+          ./kgrep-ci describe-topic --topic kgrep-ci-group-test | tee describe-after.out
+          grep -qE "kgrep-ci-inactive-group \[[A-Za-z]+, inactive\] lag=6" describe-after.out
+          grep -qE "kgrep-ci-active-group \[[A-Za-z]+, active\]" describe-after.out
 
       - name: Assert — dump reads exactly the seeded messages, no drops, full coverage
         run: |
           ./kgrep-ci dump --topic kgrep-ci-smoke-test --read-all --output-csv out.csv | tee dump.out
-          grep -q "Scanned: 5" dump.out
+          grep -q "Scanned: 9" dump.out
           grep -q "Bad records: 0" dump.out
-          grep -q "Partition coverage: 1/1 fully read" dump.out
-          [ "$(tail -n +2 out.csv | wc -l)" -eq 5 ]
-          for i in 1 2 3 4 5; do grep -q "hello-$i" out.csv; done
+          grep -q "Partition coverage: 3/3 fully read" dump.out
+          [ "$(tail -n +2 out.csv | wc -l)" -eq 9 ]
+          for i in 1 2 3 4 5 6 7 8 9; do grep -q "hello-$i" out.csv; done
+
+      - name: Assert — --max-messages is an exact cap across concurrent partitions
+        run: |
+          # Regression guard: concurrent partitions used to be able to each
+          # emit one message already in flight before noticing a shared cap
+          # was hit elsewhere, so --max-messages 1 could scan up to
+          # (partition count) messages instead of exactly 1.
+          ./kgrep-ci dump --topic kgrep-ci-smoke-test --max-messages 1 | tee capped.out
+          grep -q "Scanned: 1" capped.out
+
+      - name: Assert — consume finds a specific searched value
+        run: |
+          echo "hello-5" > search.csv
+          ./kgrep-ci consume --topic kgrep-ci-smoke-test --allowed-keys-csv search.csv --match-mode value-field | tee search.out
+          grep -q "Emitted: 1" search.out
+          grep -q "hello-5" search.out
+
+      - name: Assert — print streams live output
+        run: |
+          ./kgrep-ci print --topic kgrep-ci-smoke-test --max-messages 2 | tee print.out
+          grep -q "Scanned: 2" print.out
+
+      - name: Assert — time-window filtering includes an in-range scan and excludes an out-of-range one
+        run: |
+          ./kgrep-ci dump --topic kgrep-ci-smoke-test --read-all \
+            --from-time "$BEFORE_PRODUCE_TS" --to-time "$AFTER_PRODUCE_TS" | tee window-in.out
+          grep -q "Scanned: 9" window-in.out
+
+          ./kgrep-ci dump --topic kgrep-ci-smoke-test --read-all \
+            --from-time "2000-01-01T00:00:00Z" --to-time "2000-01-01T00:00:01Z" | tee window-out.out
+          grep -q "Scanned: 0" window-out.out
 
       - name: Assert — bad records are detected and counted, not silently dropped
         run: |
-          # Forcing avro decoding on plain-string values makes every one of
+          # Forcing avro decoding on plain-string keys makes every one of
           # them fail — a deterministic way to exercise the bad-record path
           # against a real broker instead of only hand-built test fixtures.
-          ./kgrep-ci consume --topic kgrep-ci-smoke-test --value-format avro --max-messages 5 | tee bad.out
-          grep -q "Bad records: 5" bad.out
+          ./kgrep-ci consume --topic kgrep-ci-smoke-test --key-format avro --max-messages 9 | tee bad.out
+          grep -q "Bad records: 9" bad.out
           grep -q "Good records: 0" bad.out
+
+      - name: Assert — update refuses to run on a dev build
+        run: |
+          (./kgrep-ci update || true) 2>&1 | tee update.out
+          grep -q "not available for development builds" update.out
 
       - name: Show Kafka logs on failure
         if: failure()
