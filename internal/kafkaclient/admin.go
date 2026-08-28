@@ -3,6 +3,7 @@ package kafkaclient
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -27,10 +28,12 @@ const (
 // Admin talks to the cluster for metadata/diagnostic purposes (topic
 // listing, watermarks, consumer-group lag) rather than reading records.
 type Admin struct {
-	client *kafka.Client
+	client      *kafka.Client
+	verbose     bool
+	diagnostics io.Writer
 }
 
-func NewAdmin(settings config.KafkaSettings) (*Admin, error) {
+func NewAdmin(settings config.KafkaSettings, verbose bool, diagnostics io.Writer) (*Admin, error) {
 	if len(settings.BootstrapServers) == 0 {
 		return nil, fmt.Errorf("no Kafka bootstrap servers configured")
 	}
@@ -40,7 +43,7 @@ func NewAdmin(settings config.KafkaSettings) (*Admin, error) {
 	}
 	transport := &kafka.Transport{TLS: dialer.TLS, SASL: dialer.SASLMechanism, ClientID: "kgrep", DialTimeout: 10 * time.Second}
 	client := &kafka.Client{Addr: kafka.TCP(settings.BootstrapServers...), Timeout: 30 * time.Second, Transport: transport}
-	return &Admin{client: client}, nil
+	return &Admin{client: client, verbose: verbose, diagnostics: diagnostics}, nil
 }
 
 type TopicSummary struct {
@@ -238,9 +241,12 @@ func (a *Admin) lastMessageTime(ctx context.Context, topic string, partition int
 
 // groupsForTopic finds every consumer group with committed offsets against
 // topic (whether or not it currently has active members) and computes its
-// lag. Failure to list/describe groups at all is returned as an error;
-// failure to fetch one particular group's offsets just skips that group,
-// since transient per-group issues shouldn't sink the whole report.
+// lag. Failure to list groups at all is returned as an error; a group whose
+// DescribeGroups call reported an error is still included using whatever
+// GroupID/GroupState survived (see groupStateIsActive), since only its
+// per-member details are actually unusable; a group whose OffsetFetch fails,
+// or that has no committed offset for this topic, is skipped, since transient
+// per-group issues shouldn't sink the whole report.
 func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByPartition map[int]kafka.PartitionOffsets) ([]GroupSummary, error) {
 	listResponse, err := a.client.ListGroups(ctx, &kafka.ListGroupsRequest{})
 	if err != nil {
@@ -269,8 +275,22 @@ func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByParti
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, adminFetchConcurrency)
 	for _, group := range describedGroups {
-		if group.Error != nil {
+		if group.GroupID == "" {
 			continue
+		}
+		if group.Error != nil && a.verbose {
+			// kafka-go populates GroupID/GroupState before it attempts to
+			// decode per-member metadata, so a member-decode failure (a real,
+			// observed incompatibility with at least one Java client's
+			// subscription metadata format) leaves those two fields intact
+			// and only clears Members. Reporting the group anyway — with
+			// State-derived Active instead of a Members-length check, and
+			// Lag computed independently via OffsetFetch — means a decode
+			// hiccup on member details doesn't erase an otherwise-valid
+			// group from the whole report.
+			mu.Lock()
+			fmt.Fprintf(a.diagnostics, "Group %q: DescribeGroups reported an error (member details may be incomplete): %v\n", group.GroupID, group.Error)
+			mu.Unlock()
 		}
 		wg.Add(1)
 		sem <- struct{}{}
@@ -278,12 +298,29 @@ func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByParti
 			defer wg.Done()
 			defer func() { <-sem }()
 			offsetResponse, err := a.client.OffsetFetch(ctx, &kafka.OffsetFetchRequest{GroupID: group.GroupID, Topics: map[string][]int{topic: partitionIDs}})
-			if err != nil || offsetResponse.Error != nil {
+			if err != nil {
+				if a.verbose {
+					mu.Lock()
+					fmt.Fprintf(a.diagnostics, "Group %q: OffsetFetch failed, excluding from report: %v\n", group.GroupID, err)
+					mu.Unlock()
+				}
+				return
+			}
+			if offsetResponse.Error != nil {
+				if a.verbose {
+					mu.Lock()
+					fmt.Fprintf(a.diagnostics, "Group %q: OffsetFetch reported an error, excluding from report: %v\n", group.GroupID, offsetResponse.Error)
+					mu.Unlock()
+				}
 				return
 			}
 			if summary, ok := summarizeGroup(group, topic, offsetResponse.Topics[topic], offsetsByPartition); ok {
 				mu.Lock()
 				summaries = append(summaries, summary)
+				mu.Unlock()
+			} else if a.verbose {
+				mu.Lock()
+				fmt.Fprintf(a.diagnostics, "Group %q: no committed offset for topic %q, excluding from report\n", group.GroupID, topic)
 				mu.Unlock()
 			}
 		}(group)
@@ -312,6 +349,11 @@ func (a *Admin) describeGroupsBatched(ctx context.Context, groupIDs []string) []
 			defer func() { <-sem }()
 			response, err := a.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: batch})
 			if err != nil {
+				if a.verbose {
+					mu.Lock()
+					fmt.Fprintf(a.diagnostics, "DescribeGroups batch %v failed, excluding from report: %v\n", batch, err)
+					mu.Unlock()
+				}
 				return
 			}
 			mu.Lock()
@@ -363,8 +405,27 @@ func summarizeGroup(group kafka.DescribeGroupsResponseGroup, topic string, commi
 	return GroupSummary{
 		GroupID: group.GroupID,
 		State:   group.GroupState,
-		Active:  len(group.Members) > 0,
+		Active:  groupStateIsActive(group.GroupState),
 		Members: members,
 		Lag:     lag,
 	}, true
+}
+
+// groupStateIsActive reports whether a group's broker-reported state implies
+// it currently has members, without relying on Members actually having
+// decoded successfully. This matters because kafka-go can fail to decode a
+// member's metadata (observed against a real Java consumer client) while
+// still correctly reporting GroupState — in that case Members comes back
+// empty even though the group demonstrably has a member, so len(Members) > 0
+// would silently misreport an active group as inactive. "Empty" and "Dead"
+// are Kafka's own state names for a group with no members; every other
+// state (Stable, PreparingRebalance, CompletingRebalance, ...) implies at
+// least one member is or was just attached.
+func groupStateIsActive(state string) bool {
+	switch state {
+	case "", "Empty", "Dead":
+		return false
+	default:
+		return true
+	}
 }

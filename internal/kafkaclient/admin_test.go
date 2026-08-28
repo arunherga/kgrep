@@ -82,6 +82,27 @@ func TestSummarizeGroupReportsInactiveWhenNoMembers(t *testing.T) {
 	}
 }
 
+func TestSummarizeGroupReportsActiveFromStateWhenMemberDecodeFailed(t *testing.T) {
+	// Regression test: kafka-go populates GroupID/GroupState before it
+	// attempts to decode each member's metadata, so a decode failure there
+	// (observed for real against a Java consumer client's subscription
+	// format) leaves Members empty while GroupState still correctly says
+	// "Stable" — Active must be derived from GroupState, not len(Members),
+	// or a group with a real, connected member gets silently misreported
+	// as inactive.
+	offsetsByPartition := map[int]kafka.PartitionOffsets{0: {Partition: 0, LastOffset: 100}}
+	group := kafka.DescribeGroupsResponseGroup{GroupID: "real-consumer", GroupState: "Stable", Members: nil}
+	committed := []kafka.OffsetFetchPartition{{Partition: 0, CommittedOffset: 100}}
+
+	summary, ok := summarizeGroup(group, "orders", committed, offsetsByPartition)
+	if !ok {
+		t.Fatal("expected group with a committed offset to be reported")
+	}
+	if !summary.Active {
+		t.Fatal("expected Stable group to be reported active even with no decoded members")
+	}
+}
+
 func TestSummarizeGroupIgnoresGroupsWithNoCommittedOffsetForTopic(t *testing.T) {
 	offsetsByPartition := map[int]kafka.PartitionOffsets{0: {Partition: 0, LastOffset: 100}}
 	group := kafka.DescribeGroupsResponseGroup{GroupID: "unrelated-group"}
