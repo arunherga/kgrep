@@ -1,0 +1,8 @@
+# Normalize line endings to LF in the repository regardless of the
+# platform doing the checkout or commit -- this project is built and
+# tested on Linux, macOS, and Windows (see .github/workflows), and without
+# this, Windows checkouts convert LF to CRLF on the fly, which is harmless
+# for Go source (gofmt/go build don't care) but was producing a
+# "LF will be replaced by CRLF" warning on every single commit from a
+# Windows working copy.
+* text=auto eol=lf

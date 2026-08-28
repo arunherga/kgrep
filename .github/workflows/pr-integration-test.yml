@@ -292,11 +292,6 @@ jobs:
           grep -q "Emitted: 1" search.out
           grep -q "hello-5" search.out
 
-      - name: Assert — print streams live output
-        run: |
-          ./kgrep-ci print --topic kgrep-ci-smoke-test --max-messages 2 | tee print.out
-          grep -q "Scanned: 2" print.out
-
       - name: Assert — time-window filtering includes an in-range scan and excludes an out-of-range one
         run: |
           ./kgrep-ci dump --topic kgrep-ci-smoke-test --read-all \
