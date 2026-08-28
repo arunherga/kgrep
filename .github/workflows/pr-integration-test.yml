@@ -135,19 +135,35 @@ jobs:
           # guessing how long that takes.
           docker exec -d kafka /opt/kafka/bin/kafka-console-consumer.sh \
             --topic kgrep-ci-group-test --bootstrap-server localhost:9092 \
-            --group kgrep-ci-active-group --from-beginning
+            --group kgrep-ci-active-group --from-beginning \
+            --consumer-property enable.auto.commit=true \
+            --consumer-property auto.commit.interval.ms=1000
+
+          joined=false
           for i in $(seq 1 30); do
             if docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
                  --bootstrap-server localhost:9092 --describe --group kgrep-ci-active-group 2>/dev/null \
                  | grep -q kgrep-ci-active-group; then
+              joined=true
               echo "active group joined"
-              exit 0
+              break
             fi
             echo "waiting for active group to join... ($i/30)"
             sleep 2
           done
-          echo "active group never joined" >&2
-          exit 1
+          if [ "$joined" != "true" ]; then
+            echo "active group never joined" >&2
+            exit 1
+          fi
+
+          # Membership alone isn't enough: groupsForTopic (internal/kafkaclient/admin.go)
+          # only reports a group as associated with a topic once it has at
+          # least one COMMITTED offset there — a group with no commits has
+          # no lag to compute, so it's intentionally excluded. Give the 1s
+          # auto-commit interval above several cycles to actually fire
+          # before checking, since joining and committing aren't the same
+          # moment.
+          sleep 8
 
       - name: Assert — describe-topic reports both groups correctly
         run: |
