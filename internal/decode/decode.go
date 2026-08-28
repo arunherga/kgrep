@@ -82,6 +82,12 @@ func (d *Deserializer) decode(raw []byte, field, configured string) (any, string
 		}
 		return result, actual, nil
 	case "avro":
+		// This branch handles every Confluent-wire-format message (magic
+		// byte + 4-byte schema ID), not just Avro specifically — Avro,
+		// JSON Schema, and Protobuf all share that identical framing, so
+		// the "avro" label only means the message IS wire-framed, not
+		// which of the three it actually is. That requires asking the
+		// registry what the schema ID's registered type is.
 		if len(raw) < 5 || raw[0] != 0 {
 			return nil, actual, fmt.Errorf("decode %s as Avro: invalid Confluent wire header", field)
 		}
@@ -92,6 +98,32 @@ func (d *Deserializer) decode(raw []byte, field, configured string) (any, string
 			} else {
 				fmt.Fprintf(d.Diagnostics, "Schema Registry subject %s: version=%d id=%d\n", info.Subject, info.Version, info.ID)
 			}
+		}
+		schemaType, err := d.registry.SchemaTypeOf(schemaID)
+		if err != nil {
+			return nil, actual, fmt.Errorf("decode %s: look up schema %d type: %w", field, schemaID, err)
+		}
+		switch schemaType {
+		case "JSON":
+			// Confluent's JSON Schema serializer uses the same 5-byte wire
+			// header purely for schema-ID lookup; the payload after it is
+			// plain JSON, so this reuses the same decode path as "json"
+			// above.
+			var result any
+			jsonDecoder := json.NewDecoder(bytes.NewReader(raw[5:]))
+			jsonDecoder.UseNumber()
+			if err := jsonDecoder.Decode(&result); err != nil {
+				return nil, actual, fmt.Errorf("decode %s as JSON Schema (schema %d): %w", field, schemaID, err)
+			}
+			return result, "json", nil
+		case "PROTOBUF":
+			// Decoding Protobuf requires parsing the registered .proto
+			// schema into a descriptor and handling Confluent's
+			// message-index prefix — not implemented. Reporting this
+			// plainly is far more honest than the previous behavior:
+			// silently trying to compile the .proto text as an Avro
+			// schema and failing with an unrelated, confusing error.
+			return nil, actual, fmt.Errorf("decode %s: schema %d is PROTOBUF, which kgrep does not support decoding yet", field, schemaID)
 		}
 		codec, err := d.registry.Codec(schemaID)
 		if err != nil {
@@ -120,16 +152,73 @@ type SubjectInfo struct {
 	SchemaType string
 }
 
+// schemaByID is what a single GET /schemas/ids/{id} call returns: the raw
+// schema text plus its registered type. SchemaTypeOf and Codec both need
+// data from the same response, so they share one cache/fetch instead of
+// each hitting the registry independently for the same ID.
+type schemaByID struct {
+	schemaType string
+	rawSchema  string
+}
+
 type RegistryClient struct {
 	settings config.SchemaRegistrySettings
 	http     *http.Client
 	mu       sync.RWMutex
+	schemas  map[uint32]schemaByID
 	codecs   map[uint32]*goavro.Codec
 	subjects map[string]SubjectInfo
 }
 
 func NewRegistryClient(settings config.SchemaRegistrySettings) *RegistryClient {
-	return &RegistryClient{settings: settings, http: &http.Client{Timeout: 15 * time.Second}, codecs: make(map[uint32]*goavro.Codec), subjects: make(map[string]SubjectInfo)}
+	return &RegistryClient{
+		settings: settings,
+		http:     &http.Client{Timeout: 15 * time.Second},
+		schemas:  make(map[uint32]schemaByID),
+		codecs:   make(map[uint32]*goavro.Codec),
+		subjects: make(map[string]SubjectInfo),
+	}
+}
+
+func (c *RegistryClient) fetchSchema(id uint32) (schemaByID, error) {
+	c.mu.RLock()
+	if entry, ok := c.schemas[id]; ok {
+		c.mu.RUnlock()
+		return entry, nil
+	}
+	c.mu.RUnlock()
+	var response struct {
+		Schema     string `json:"schema"`
+		SchemaType string `json:"schemaType"`
+	}
+	if err := c.get(fmt.Sprintf("/schemas/ids/%d", id), &response); err != nil {
+		return schemaByID{}, err
+	}
+	schemaType := response.SchemaType
+	if schemaType == "" {
+		// Older Schema Registry versions that predate multi-format support
+		// omit this field entirely; AVRO was the only type they ever served.
+		schemaType = "AVRO"
+	}
+	entry := schemaByID{schemaType: schemaType, rawSchema: response.Schema}
+	c.mu.Lock()
+	if existing, ok := c.schemas[id]; ok {
+		entry = existing
+	} else {
+		c.schemas[id] = entry
+	}
+	c.mu.Unlock()
+	return entry, nil
+}
+
+// SchemaTypeOf returns the registered type (AVRO, JSON, or PROTOBUF) of the
+// schema with this ID.
+func (c *RegistryClient) SchemaTypeOf(id uint32) (string, error) {
+	entry, err := c.fetchSchema(id)
+	if err != nil {
+		return "", err
+	}
+	return entry.schemaType, nil
 }
 
 func (c *RegistryClient) Codec(id uint32) (*goavro.Codec, error) {
@@ -139,13 +228,11 @@ func (c *RegistryClient) Codec(id uint32) (*goavro.Codec, error) {
 	if codec != nil {
 		return codec, nil
 	}
-	var response struct {
-		Schema string `json:"schema"`
-	}
-	if err := c.get(fmt.Sprintf("/schemas/ids/%d", id), &response); err != nil {
+	entry, err := c.fetchSchema(id)
+	if err != nil {
 		return nil, err
 	}
-	created, err := goavro.NewCodec(response.Schema)
+	created, err := goavro.NewCodec(entry.rawSchema)
 	if err != nil {
 		return nil, fmt.Errorf("compile Schema Registry schema %d: %w", id, err)
 	}
