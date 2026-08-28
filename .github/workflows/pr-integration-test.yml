@@ -90,6 +90,65 @@ jobs:
               --topic kgrep-ci-group-test --bootstrap-server localhost:9092
           sleep 2
 
+      - name: Start Schema Registry
+        run: |
+          # --network host: the simplest way for this container to reach
+          # the Kafka container above, which only advertises a
+          # localhost-only PLAINTEXT listener (no separate inter-container
+          # hostname/listener was set up for it). With host networking,
+          # this container shares the runner's actual network stack, so
+          # "localhost:9092" here reaches the same port Kafka published
+          # via -p 9092:9092 — no changes to the Kafka step needed.
+          docker run -d --name schema-registry --network host \
+            -e SCHEMA_REGISTRY_HOST_NAME=localhost \
+            -e SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=localhost:9092 \
+            -e SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081 \
+            confluentinc/cp-schema-registry:latest
+
+      - name: Wait for Schema Registry to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8081/subjects >/dev/null 2>&1; then
+              echo "Schema Registry is up"
+              exit 0
+            fi
+            echo "Waiting for Schema Registry... ($i/30)"
+            sleep 3
+          done
+          echo "Schema Registry never became ready" >&2
+          docker logs schema-registry
+          exit 1
+
+      - name: Create and seed Avro / JSON Schema / Protobuf test topics
+        run: |
+          for topic in kgrep-ci-avro-test kgrep-ci-jsonschema-test kgrep-ci-protobuf-test kgrep-ci-protobuf-nested-test; do
+            docker exec kafka /opt/kafka/bin/kafka-topics.sh --create \
+              --topic "$topic" --partitions 1 --replication-factor 1 --bootstrap-server localhost:9092
+          done
+
+          echo '{"orderId":"order-1","amount":42.5}' | docker exec -i schema-registry kafka-avro-console-producer \
+            --topic kgrep-ci-avro-test --bootstrap-server localhost:9092 \
+            --property schema.registry.url=http://localhost:8081 \
+            --property value.schema='{"type":"record","name":"Order","fields":[{"name":"orderId","type":"string"},{"name":"amount","type":"double"}]}'
+
+          echo '{"orderId":"order-2","amount":99.9}' | docker exec -i schema-registry kafka-json-schema-console-producer \
+            --topic kgrep-ci-jsonschema-test --bootstrap-server localhost:9092 \
+            --property schema.registry.url=http://localhost:8081 \
+            --property value.schema='{"type":"object","properties":{"orderId":{"type":"string"},"amount":{"type":"number"}},"required":["orderId","amount"]}'
+
+          echo '{"orderId":"order-3","amount":15.75}' | docker exec -i schema-registry kafka-protobuf-console-producer \
+            --topic kgrep-ci-protobuf-test --bootstrap-server localhost:9092 \
+            --property schema.registry.url=http://localhost:8081 \
+            --property value.schema='syntax = "proto3"; message Order { string orderId = 1; double amount = 2; }'
+
+          # A nested field type, not just top-level scalars -- exercises
+          # protojson's structural nesting on top of the message-index path
+          # already covered directly by unit tests.
+          echo '{"item":{"sku":"sku-42","qty":3},"orderId":"order-9"}' | docker exec -i schema-registry kafka-protobuf-console-producer \
+            --topic kgrep-ci-protobuf-nested-test --bootstrap-server localhost:9092 \
+            --property schema.registry.url=http://localhost:8081 \
+            --property value.schema='syntax = "proto3"; message Order { message Item { string sku = 1; int32 qty = 2; } Item item = 1; string orderId = 2; }'
+
       - name: Build kgrep from this PR's code
         run: go build -o ./kgrep-ci ./cmd/kgrep
 
@@ -99,6 +158,7 @@ jobs:
           KAFKA_BOOTSTRAP_SERVERS=localhost:9092
           KAFKA_SECURITY_PROTOCOL=PLAINTEXT
           KAFKA_DEFAULT_TOPIC=kgrep-ci-smoke-test
+          SCHEMA_REGISTRY_URL=http://localhost:8081
           EOF
 
       - name: Assert — topics lists both seeded topics
@@ -232,6 +292,34 @@ jobs:
           (./kgrep-ci update || true) 2>&1 | tee update.out
           grep -q "not available for development builds" update.out
 
-      - name: Show Kafka logs on failure
+      - name: Assert — Avro decodes correctly against a real Schema Registry
+        run: |
+          ./kgrep-ci dump --topic kgrep-ci-avro-test --read-all | tee avro.out
+          grep -q "Bad records: 0" avro.out
+          grep -q "order-1" avro.out
+          grep -q "42.5" avro.out
+
+      - name: Assert — JSON Schema decodes correctly (not misread as Avro)
+        run: |
+          ./kgrep-ci dump --topic kgrep-ci-jsonschema-test --read-all | tee jsonschema.out
+          grep -q "Bad records: 0" jsonschema.out
+          grep -q "order-2" jsonschema.out
+          grep -q "99.9" jsonschema.out
+
+      - name: Assert — Protobuf decodes correctly, including a nested field
+        run: |
+          ./kgrep-ci dump --topic kgrep-ci-protobuf-test --read-all | tee protobuf.out
+          grep -q "Bad records: 0" protobuf.out
+          grep -q "order-3" protobuf.out
+          grep -q "15.75" protobuf.out
+
+          ./kgrep-ci dump --topic kgrep-ci-protobuf-nested-test --read-all | tee protobuf-nested.out
+          grep -q "Bad records: 0" protobuf-nested.out
+          grep -q "sku-42" protobuf-nested.out
+          grep -q "order-9" protobuf-nested.out
+
+      - name: Show Kafka / Schema Registry logs on failure
         if: failure()
-        run: docker logs kafka
+        run: |
+          docker logs kafka
+          docker logs schema-registry || true
