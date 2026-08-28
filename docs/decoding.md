@@ -30,11 +30,12 @@ Confluent's Avro, JSON Schema, and Protobuf serializers all use the *same* wire 
 
 - **Avro** — decoded fully. `kgrep` fetches (and caches) the schema by ID and decodes the binary payload; you never need to supply a schema up front.
 - **JSON Schema** — decoded fully. The payload after the 5-byte header is already plain JSON (the schema is only used by producers for validation), so this is parsed the same way as plain `json` values.
-- **Protobuf** — not supported yet. A Protobuf record is reported as a bad record with a clear `... is PROTOBUF, which kgrep does not support decoding yet` error, rather than a misleading Avro-compile failure.
+- **Protobuf** — decoded fully, dynamically. `kgrep` compiles the schema's `.proto` source (fetched from Schema Registry, including any schemas it references by name) into a message descriptor at runtime, parses Confluent's message-index prefix to find the right message type within that schema, and decodes the binary payload against it — no generated Go types or `protoc` step required, the same way Avro decoding needs no generated types.
 
 Other notes:
 - `SCHEMA_REGISTRY_URL` (plus optional `SCHEMA_REGISTRY_USERNAME`/`PASSWORD` for basic auth) must be set for any of this to work; without it, these records fail with a clear error rather than being silently skipped.
-- Each distinct schema ID is fetched once per process and cached after that (both its type and, for Avro, its compiled schema) — a long-running scan across many records with the same schema does not re-fetch it per record.
+- Each distinct schema ID is fetched once per process and cached after that (its type and, depending on type, its compiled Avro codec or compiled Protobuf message descriptor) — a long-running scan across many records with the same schema does not re-fetch or recompile it per record.
+- A Protobuf schema that imports other registered schemas by name (via Schema Registry's "references") has those resolved and compiled alongside it automatically; well-known Google types (e.g. `google/protobuf/timestamp.proto`) are also available without needing to be separately registered.
 - `--verbose` additionally looks up and prints the `<topic>-key` or `<topic>-value` subject's *latest* registered version, ID, and type, for comparing against the schema ID actually seen on the wire (useful for spotting producers still writing an old schema version). This lookup is not cached and is not on the decode path — it only runs in verbose mode, once per record's key/value, purely as a diagnostic. If the lookup itself fails (e.g. the subject doesn't exist), that failure is printed as a diagnostic but does not fail the record — the record's good/bad status still depends only on whether the schema-ID-based decode itself succeeded.
 
 ## Bad records

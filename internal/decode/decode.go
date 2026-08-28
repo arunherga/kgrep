@@ -43,10 +43,12 @@ type Deserializer struct {
 	Verbose     bool
 	Diagnostics io.Writer
 	registry    *RegistryClient
+	protobuf    *protobufDecoder
 }
 
 func New(topic, keyFormat, valueFormat string, settings config.SchemaRegistrySettings, verbose bool, diagnostics io.Writer) *Deserializer {
-	return &Deserializer{Topic: topic, KeyFormat: keyFormat, ValueFormat: valueFormat, Verbose: verbose, Diagnostics: diagnostics, registry: NewRegistryClient(settings)}
+	registry := NewRegistryClient(settings)
+	return &Deserializer{Topic: topic, KeyFormat: keyFormat, ValueFormat: valueFormat, Verbose: verbose, Diagnostics: diagnostics, registry: registry, protobuf: newProtobufDecoder(registry)}
 }
 
 func (d *Deserializer) DecodeKey(raw []byte) (any, string, error) {
@@ -99,11 +101,11 @@ func (d *Deserializer) decode(raw []byte, field, configured string) (any, string
 				fmt.Fprintf(d.Diagnostics, "Schema Registry subject %s: version=%d id=%d\n", info.Subject, info.Version, info.ID)
 			}
 		}
-		schemaType, err := d.registry.SchemaTypeOf(schemaID)
+		entry, err := d.registry.fetchSchema(schemaID)
 		if err != nil {
-			return nil, actual, fmt.Errorf("decode %s: look up schema %d type: %w", field, schemaID, err)
+			return nil, actual, fmt.Errorf("decode %s: look up schema %d: %w", field, schemaID, err)
 		}
-		switch schemaType {
+		switch entry.schemaType {
 		case "JSON":
 			// Confluent's JSON Schema serializer uses the same 5-byte wire
 			// header purely for schema-ID lookup; the payload after it is
@@ -117,13 +119,11 @@ func (d *Deserializer) decode(raw []byte, field, configured string) (any, string
 			}
 			return result, "json", nil
 		case "PROTOBUF":
-			// Decoding Protobuf requires parsing the registered .proto
-			// schema into a descriptor and handling Confluent's
-			// message-index prefix — not implemented. Reporting this
-			// plainly is far more honest than the previous behavior:
-			// silently trying to compile the .proto text as an Avro
-			// schema and failing with an unrelated, confusing error.
-			return nil, actual, fmt.Errorf("decode %s: schema %d is PROTOBUF, which kgrep does not support decoding yet", field, schemaID)
+			value, err := d.protobuf.decode(schemaID, entry.rawSchema, entry.references, raw[5:])
+			if err != nil {
+				return nil, actual, fmt.Errorf("decode %s as Protobuf (schema %d): %w", field, schemaID, err)
+			}
+			return value, "protobuf", nil
 		}
 		codec, err := d.registry.Codec(schemaID)
 		if err != nil {
@@ -152,13 +152,24 @@ type SubjectInfo struct {
 	SchemaType string
 }
 
+// schemaReference is one entry of a Protobuf (or Avro) schema's "references"
+// list: another registered schema this one imports by name, identified by
+// subject+version rather than by ID.
+type schemaReference struct {
+	Name    string `json:"name"`
+	Subject string `json:"subject"`
+	Version int    `json:"version"`
+}
+
 // schemaByID is what a single GET /schemas/ids/{id} call returns: the raw
-// schema text plus its registered type. SchemaTypeOf and Codec both need
-// data from the same response, so they share one cache/fetch instead of
-// each hitting the registry independently for the same ID.
+// schema text, its registered type, and any schemas it references by name.
+// Codec, and the Protobuf decoder's descriptor compilation, both need data
+// from the same response, so they share one cache/fetch instead of each
+// hitting the registry independently for the same ID.
 type schemaByID struct {
 	schemaType string
 	rawSchema  string
+	references []schemaReference
 }
 
 type RegistryClient struct {
@@ -188,8 +199,9 @@ func (c *RegistryClient) fetchSchema(id uint32) (schemaByID, error) {
 	}
 	c.mu.RUnlock()
 	var response struct {
-		Schema     string `json:"schema"`
-		SchemaType string `json:"schemaType"`
+		Schema     string            `json:"schema"`
+		SchemaType string            `json:"schemaType"`
+		References []schemaReference `json:"references"`
 	}
 	if err := c.get(fmt.Sprintf("/schemas/ids/%d", id), &response); err != nil {
 		return schemaByID{}, err
@@ -200,7 +212,7 @@ func (c *RegistryClient) fetchSchema(id uint32) (schemaByID, error) {
 		// omit this field entirely; AVRO was the only type they ever served.
 		schemaType = "AVRO"
 	}
-	entry := schemaByID{schemaType: schemaType, rawSchema: response.Schema}
+	entry := schemaByID{schemaType: schemaType, rawSchema: response.Schema, references: response.References}
 	c.mu.Lock()
 	if existing, ok := c.schemas[id]; ok {
 		entry = existing
@@ -211,14 +223,35 @@ func (c *RegistryClient) fetchSchema(id uint32) (schemaByID, error) {
 	return entry, nil
 }
 
-// SchemaTypeOf returns the registered type (AVRO, JSON, or PROTOBUF) of the
-// schema with this ID.
-func (c *RegistryClient) SchemaTypeOf(id uint32) (string, error) {
-	entry, err := c.fetchSchema(id)
-	if err != nil {
-		return "", err
+// schemaBySubjectVersion resolves one entry of a schema's "references" list
+// (identified by subject+version, not by ID, since that's what Schema
+// Registry's reference metadata gives) into the same shape fetchSchema
+// returns, so reference resolution can recurse uniformly. Not cached by
+// subject+version — schemaByID's own by-ID caching (keyed by the ID
+// embedded in this response) still avoids re-fetching the same schema
+// across multiple decodes.
+func (c *RegistryClient) schemaBySubjectVersion(subject string, version int) (schemaByID, error) {
+	var response struct {
+		ID         uint32            `json:"id"`
+		Schema     string            `json:"schema"`
+		SchemaType string            `json:"schemaType"`
+		References []schemaReference `json:"references"`
 	}
-	return entry.schemaType, nil
+	path := fmt.Sprintf("/subjects/%s/versions/%d", url.PathEscape(subject), version)
+	if err := c.get(path, &response); err != nil {
+		return schemaByID{}, err
+	}
+	schemaType := response.SchemaType
+	if schemaType == "" {
+		schemaType = "AVRO"
+	}
+	entry := schemaByID{schemaType: schemaType, rawSchema: response.Schema, references: response.References}
+	c.mu.Lock()
+	if _, ok := c.schemas[response.ID]; !ok {
+		c.schemas[response.ID] = entry
+	}
+	c.mu.Unlock()
+	return entry, nil
 }
 
 func (c *RegistryClient) Codec(id uint32) (*goavro.Codec, error) {

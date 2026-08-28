@@ -2,6 +2,7 @@ package decode
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -10,7 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bufbuild/protocompile"
 	"github.com/linkedin/goavro/v2"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"kgrep/internal/config"
 )
@@ -150,16 +155,112 @@ func TestDeserializerDecodesJSONSchemaMessagesAsPlainJSON(t *testing.T) {
 	}
 }
 
-func TestDeserializerReportsProtobufAsUnsupportedInsteadOfMisdecoding(t *testing.T) {
+func compileTestProto(t *testing.T, source string) protoreflect.FileDescriptor {
+	t.Helper()
+	compiled, err := (&protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(&protocompile.SourceResolver{
+			Accessor: protocompile.SourceAccessorFromMap(map[string]string{"test.proto": source}),
+		}),
+	}).Compile(context.Background(), "test.proto")
+	if err != nil {
+		t.Fatalf("compile test schema: %v", err)
+	}
+	return compiled[0]
+}
+
+func TestDeserializerDecodesProtobufMessagesDynamically(t *testing.T) {
+	const schema = `syntax = "proto3"; message Order { string id = 1; double amount = 2; }`
+	file := compileTestProto(t, schema)
+	descriptor := file.Messages().Get(0)
+	message := dynamicpb.NewMessage(descriptor)
+	message.Set(descriptor.Fields().ByName("id"), protoreflect.ValueOfString("abc"))
+	message.Set(descriptor.Fields().ByName("amount"), protoreflect.ValueOfFloat64(42.5))
+	payload, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		body := io.NopCloser(strings.NewReader(`{"schema":"syntax = \"proto3\";","schemaType":"PROTOBUF"}`))
+		body := io.NopCloser(strings.NewReader(fmt.Sprintf(`{"schema":%q,"schemaType":"PROTOBUF"}`, schema)))
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: body, Request: request}, nil
 	})
-	wire := []byte{0, 0, 0, 0, 5, 0xde, 0xad, 0xbe, 0xef}
+
+	// 5-byte Confluent header, then the message-index shortcut byte for the
+	// (overwhelmingly common) single-top-level-message case, then the raw
+	// protobuf bytes.
+	wire := make([]byte, 5, 5+1+len(payload))
+	binary.BigEndian.PutUint32(wire[1:], 11)
+	wire = append(wire, 0)
+	wire = append(wire, payload...)
+
 	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{URL: "https://registry.example"}, false, io.Discard)
 	deserializer.registry.http.Transport = transport
-	_, _, err := deserializer.DecodeValue(wire)
-	if err == nil || !strings.Contains(err.Error(), "PROTOBUF") || !strings.Contains(err.Error(), "does not support") {
-		t.Fatalf("expected a clear PROTOBUF-unsupported error, got: %v", err)
+	value, format, err := deserializer.DecodeValue(wire)
+	if err != nil || format != "protobuf" {
+		t.Fatalf("value=%#v format=%s err=%v", value, format, err)
+	}
+	decoded, ok := value.(map[string]any)
+	if !ok || decoded["id"] != "abc" {
+		t.Fatalf("expected decoded field id=abc, got %#v", value)
+	}
+}
+
+func TestDecodeMessageIndexesShortcutForFirstTopLevelMessage(t *testing.T) {
+	indexes, rest, err := decodeMessageIndexes([]byte{0, 0xAA, 0xBB})
+	if err != nil || !reflect.DeepEqual(indexes, []int{0}) || !bytes.Equal(rest, []byte{0xAA, 0xBB}) {
+		t.Fatalf("indexes=%v rest=%v err=%v", indexes, rest, err)
+	}
+}
+
+func TestDecodeMessageIndexesGeneralForm(t *testing.T) {
+	// count=2, indexes=[3, 1], then 2 bytes of "payload" that must be left
+	// untouched in rest.
+	indexes, rest, err := decodeMessageIndexes([]byte{2, 3, 1, 0xAA, 0xBB})
+	if err != nil || !reflect.DeepEqual(indexes, []int{3, 1}) || !bytes.Equal(rest, []byte{0xAA, 0xBB}) {
+		t.Fatalf("indexes=%v rest=%v err=%v", indexes, rest, err)
+	}
+}
+
+func TestDeserializerDecodesNestedProtobufMessageViaMessageIndex(t *testing.T) {
+	// A schema with two top-level messages, the second having a nested
+	// type -- exercises the general (non-shortcut) message-index path,
+	// which the single-message shortcut test above can't reach.
+	const schema = `syntax = "proto3";
+		message First { string ignored = 1; }
+		message Second {
+			message Inner { string label = 1; }
+			Inner inner = 1;
+		}`
+	file := compileTestProto(t, schema)
+	second := file.Messages().Get(1)
+	inner := second.Messages().Get(0)
+	message := dynamicpb.NewMessage(inner)
+	message.Set(inner.Fields().ByName("label"), protoreflect.ValueOfString("nested-value"))
+	payload, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := io.NopCloser(strings.NewReader(fmt.Sprintf(`{"schema":%q,"schemaType":"PROTOBUF"}`, schema)))
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: body, Request: request}, nil
+	})
+
+	// message index [1, 0]: top-level message 1 (Second), nested message 0
+	// (Inner) -- encoded in general form as count=2, then the two indexes.
+	wire := make([]byte, 5, 5+3+len(payload))
+	binary.BigEndian.PutUint32(wire[1:], 22)
+	wire = append(wire, 2, 1, 0)
+	wire = append(wire, payload...)
+
+	deserializer := New("topic", "avro", "avro", config.SchemaRegistrySettings{URL: "https://registry.example"}, false, io.Discard)
+	deserializer.registry.http.Transport = transport
+	value, _, err := deserializer.DecodeValue(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, ok := value.(map[string]any)
+	if !ok || decoded["label"] != "nested-value" {
+		t.Fatalf("expected decoded label=nested-value, got %#v", value)
 	}
 }

@@ -10,7 +10,7 @@ A command-line tool for looking inside a Kafka topic: search for specific record
 - **List every topic** in the cluster, and **inspect one topic in depth** — partitions, retained message count, last-write time, schema type, and every consumer group reading it with its lag — [`topics`/`describe-topic`](docs/commands.md#topics)
 - **Update itself** with one command when a new version comes out — no re-downloading by hand — [`update`](docs/commands.md#update)
 
-It automatically understands plain text, JSON, and Avro-encoded messages, and it tells you clearly when a record couldn't be read, instead of silently skipping it or crashing.
+It automatically understands plain text, JSON, and Confluent Schema Registry-encoded messages (Avro, JSON Schema, or Protobuf), and it tells you clearly when a record couldn't be read, instead of silently skipping it or crashing.
 
 ---
 
@@ -140,7 +140,7 @@ kgrep is configured entirely through environment variables — usually via a `.e
 | `KAFKA_SASL_MECHANISM` | Only needed for `SASL_SSL`/`SASL_PLAINTEXT`. One of `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`. |
 | `KAFKA_USERNAME` / `KAFKA_PASSWORD` | Your Kafka login credentials. |
 | `KAFKA_DEFAULT_TOPIC` | The topic to use when you don't pass `--topic` on the command line. |
-| `SCHEMA_REGISTRY_URL` | Only needed if your messages are Avro-encoded. The address of your Schema Registry. |
+| `SCHEMA_REGISTRY_URL` | Only needed if your messages are Avro/JSON Schema/Protobuf-encoded. The address of your Schema Registry. |
 | `SCHEMA_REGISTRY_USERNAME` / `SCHEMA_REGISTRY_PASSWORD` | Only needed if Schema Registry requires a login. |
 
 A ready-to-copy template is in [.env.example](.env.example) — copy it to `.env` and fill in your real values.
@@ -228,7 +228,7 @@ kgrep downloads the right file for your computer, checks it against the publishe
 
 - [docs/commands.md](docs/commands.md) — the three commands in depth, output columns, the scan summary
 - [docs/matching.md](docs/matching.md) — how searching for values works, field paths, the `delivery-identifiers` shortcut
-- [docs/decoding.md](docs/decoding.md) — how message formats are detected, Avro/Schema Registry behavior, what makes a record "bad"
+- [docs/decoding.md](docs/decoding.md) — how message formats are detected, Avro/JSON Schema/Protobuf/Schema Registry behavior, what makes a record "bad"
 - [docs/architecture.md](docs/architecture.md) — for contributors changing the code: package responsibilities, data flow, key invariants
 
 ## For developers
@@ -246,7 +246,7 @@ Every tag pushed as `vX.Y.Z` on `main` automatically builds and publishes binari
 ## Compatibility notes
 
 - Kafka security protocols `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` are recognized. SASL mechanisms `PLAIN`, `SCRAM-SHA-256`, and `SCRAM-SHA-512` are supported.
-- Avro payloads must use Confluent's five-byte wire header. The schema ID in each message selects the writer schema; `--verbose` additionally reports the standard `<topic>-key` or `<topic>-value` subject's latest version.
+- Avro, JSON Schema, and Protobuf payloads must use Confluent's five-byte wire header. The schema ID in each message selects the writer schema, and its registered type (fetched from Schema Registry) selects how it's decoded; `--verbose` additionally reports the standard `<topic>-key` or `<topic>-value` subject's latest version.
 - `--max-messages 0` means unlimited. Negative limits and invalid time ranges are rejected early.
 - Deserialization failures never stop a scan — a record is counted "good" only if both its key and value decode successfully; failures are reported with their exact topic/partition/offset location and counted separately. See [docs/decoding.md](docs/decoding.md) for details.
 
