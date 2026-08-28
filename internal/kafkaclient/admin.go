@@ -3,6 +3,7 @@ package kafkaclient
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -27,10 +28,12 @@ const (
 // Admin talks to the cluster for metadata/diagnostic purposes (topic
 // listing, watermarks, consumer-group lag) rather than reading records.
 type Admin struct {
-	client *kafka.Client
+	client      *kafka.Client
+	verbose     bool
+	diagnostics io.Writer
 }
 
-func NewAdmin(settings config.KafkaSettings) (*Admin, error) {
+func NewAdmin(settings config.KafkaSettings, verbose bool, diagnostics io.Writer) (*Admin, error) {
 	if len(settings.BootstrapServers) == 0 {
 		return nil, fmt.Errorf("no Kafka bootstrap servers configured")
 	}
@@ -40,7 +43,7 @@ func NewAdmin(settings config.KafkaSettings) (*Admin, error) {
 	}
 	transport := &kafka.Transport{TLS: dialer.TLS, SASL: dialer.SASLMechanism, ClientID: "kgrep", DialTimeout: 10 * time.Second}
 	client := &kafka.Client{Addr: kafka.TCP(settings.BootstrapServers...), Timeout: 30 * time.Second, Transport: transport}
-	return &Admin{client: client}, nil
+	return &Admin{client: client, verbose: verbose, diagnostics: diagnostics}, nil
 }
 
 type TopicSummary struct {
@@ -270,6 +273,11 @@ func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByParti
 	sem := make(chan struct{}, adminFetchConcurrency)
 	for _, group := range describedGroups {
 		if group.Error != nil {
+			if a.verbose {
+				mu.Lock()
+				fmt.Fprintf(a.diagnostics, "Group %q: DescribeGroups reported an error, excluding from report: %v\n", group.GroupID, group.Error)
+				mu.Unlock()
+			}
 			continue
 		}
 		wg.Add(1)
@@ -278,12 +286,29 @@ func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByParti
 			defer wg.Done()
 			defer func() { <-sem }()
 			offsetResponse, err := a.client.OffsetFetch(ctx, &kafka.OffsetFetchRequest{GroupID: group.GroupID, Topics: map[string][]int{topic: partitionIDs}})
-			if err != nil || offsetResponse.Error != nil {
+			if err != nil {
+				if a.verbose {
+					mu.Lock()
+					fmt.Fprintf(a.diagnostics, "Group %q: OffsetFetch failed, excluding from report: %v\n", group.GroupID, err)
+					mu.Unlock()
+				}
+				return
+			}
+			if offsetResponse.Error != nil {
+				if a.verbose {
+					mu.Lock()
+					fmt.Fprintf(a.diagnostics, "Group %q: OffsetFetch reported an error, excluding from report: %v\n", group.GroupID, offsetResponse.Error)
+					mu.Unlock()
+				}
 				return
 			}
 			if summary, ok := summarizeGroup(group, topic, offsetResponse.Topics[topic], offsetsByPartition); ok {
 				mu.Lock()
 				summaries = append(summaries, summary)
+				mu.Unlock()
+			} else if a.verbose {
+				mu.Lock()
+				fmt.Fprintf(a.diagnostics, "Group %q: no committed offset for topic %q, excluding from report\n", group.GroupID, topic)
 				mu.Unlock()
 			}
 		}(group)
@@ -312,6 +337,11 @@ func (a *Admin) describeGroupsBatched(ctx context.Context, groupIDs []string) []
 			defer func() { <-sem }()
 			response, err := a.client.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: batch})
 			if err != nil {
+				if a.verbose {
+					mu.Lock()
+					fmt.Fprintf(a.diagnostics, "DescribeGroups batch %v failed, excluding from report: %v\n", batch, err)
+					mu.Unlock()
+				}
 				return
 			}
 			mu.Lock()

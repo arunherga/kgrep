@@ -107,11 +107,11 @@ func run(version string, args []string, stdout, stderr io.Writer) (string, int) 
 	case "topics":
 		return command, runTopics(stdout, stderr)
 	case "describe-topic":
-		topicFlag, parseCode := parseDescribeTopicOptions(commandArgs, stderr)
+		topicFlag, verbose, parseCode := parseDescribeTopicOptions(commandArgs, stderr)
 		if parseCode >= 0 {
 			return command, parseCode
 		}
-		return command, runDescribeTopic(topicFlag, stdout, stderr)
+		return command, runDescribeTopic(topicFlag, verbose, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n", command)
 		printUsage(stderr)

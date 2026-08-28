@@ -22,7 +22,7 @@ func runTopics(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	admin, err := kafkaclient.NewAdmin(settings)
+	admin, err := kafkaclient.NewAdmin(settings, false, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -54,24 +54,25 @@ func writeTopicsTable(stdout io.Writer, topics []kafkaclient.TopicSummary) {
 	fmt.Fprintf(stdout, "\n%d topic(s)\n", len(topics))
 }
 
-func parseDescribeTopicOptions(args []string, stderr io.Writer) (string, int) {
+func parseDescribeTopicOptions(args []string, stderr io.Writer) (string, bool, int) {
 	flags := flag.NewFlagSet("describe-topic", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	topic := flags.String("topic", "", "Kafka topic; defaults to KAFKA_DEFAULT_TOPIC")
+	verbose := flags.Bool("verbose", false, "Print diagnostics for consumer groups excluded from the report")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return "", 0
+			return "", false, 0
 		}
-		return "", 2
+		return "", false, 2
 	}
 	if flags.NArg() != 0 {
 		fmt.Fprintf(stderr, "error: unexpected arguments: %s\n", strings.Join(flags.Args(), " "))
-		return "", 2
+		return "", false, 2
 	}
-	return *topic, -1
+	return *topic, *verbose, -1
 }
 
-func runDescribeTopic(topicFlag string, stdout, stderr io.Writer) int {
+func runDescribeTopic(topicFlag string, verbose bool, stdout, stderr io.Writer) int {
 	settings, err := config.KafkaFromEnv()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -85,7 +86,7 @@ func runDescribeTopic(topicFlag string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error: --topic or KAFKA_DEFAULT_TOPIC is required")
 		return 2
 	}
-	admin, err := kafkaclient.NewAdmin(settings)
+	admin, err := kafkaclient.NewAdmin(settings, verbose, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

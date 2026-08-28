@@ -173,8 +173,8 @@ jobs:
           echo "=== Kafka's own view of the inactive group ==="
           docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
             --bootstrap-server localhost:9092 --describe --group kgrep-ci-inactive-group || true
-          echo "=== kgrep's describe-topic ==="
-          ./kgrep-ci describe-topic --topic kgrep-ci-group-test | tee describe-after.out
+          echo "=== kgrep's describe-topic (verbose) ==="
+          ./kgrep-ci describe-topic --topic kgrep-ci-group-test --verbose 2>&1 | tee describe-after.out
           grep -qE "kgrep-ci-inactive-group \[[A-Za-z]+, inactive\] lag=6" describe-after.out
           grep -qE "kgrep-ci-active-group \[[A-Za-z]+, active\]" describe-after.out
 
