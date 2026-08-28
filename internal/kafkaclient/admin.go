@@ -241,9 +241,12 @@ func (a *Admin) lastMessageTime(ctx context.Context, topic string, partition int
 
 // groupsForTopic finds every consumer group with committed offsets against
 // topic (whether or not it currently has active members) and computes its
-// lag. Failure to list/describe groups at all is returned as an error;
-// failure to fetch one particular group's offsets just skips that group,
-// since transient per-group issues shouldn't sink the whole report.
+// lag. Failure to list groups at all is returned as an error; a group whose
+// DescribeGroups call reported an error is still included using whatever
+// GroupID/GroupState survived (see groupStateIsActive), since only its
+// per-member details are actually unusable; a group whose OffsetFetch fails,
+// or that has no committed offset for this topic, is skipped, since transient
+// per-group issues shouldn't sink the whole report.
 func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByPartition map[int]kafka.PartitionOffsets) ([]GroupSummary, error) {
 	listResponse, err := a.client.ListGroups(ctx, &kafka.ListGroupsRequest{})
 	if err != nil {
@@ -272,13 +275,22 @@ func (a *Admin) groupsForTopic(ctx context.Context, topic string, offsetsByParti
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, adminFetchConcurrency)
 	for _, group := range describedGroups {
-		if group.Error != nil {
-			if a.verbose {
-				mu.Lock()
-				fmt.Fprintf(a.diagnostics, "Group %q: DescribeGroups reported an error, excluding from report: %v\n", group.GroupID, group.Error)
-				mu.Unlock()
-			}
+		if group.GroupID == "" {
 			continue
+		}
+		if group.Error != nil && a.verbose {
+			// kafka-go populates GroupID/GroupState before it attempts to
+			// decode per-member metadata, so a member-decode failure (a real,
+			// observed incompatibility with at least one Java client's
+			// subscription metadata format) leaves those two fields intact
+			// and only clears Members. Reporting the group anyway — with
+			// State-derived Active instead of a Members-length check, and
+			// Lag computed independently via OffsetFetch — means a decode
+			// hiccup on member details doesn't erase an otherwise-valid
+			// group from the whole report.
+			mu.Lock()
+			fmt.Fprintf(a.diagnostics, "Group %q: DescribeGroups reported an error (member details may be incomplete): %v\n", group.GroupID, group.Error)
+			mu.Unlock()
 		}
 		wg.Add(1)
 		sem <- struct{}{}
@@ -393,8 +405,27 @@ func summarizeGroup(group kafka.DescribeGroupsResponseGroup, topic string, commi
 	return GroupSummary{
 		GroupID: group.GroupID,
 		State:   group.GroupState,
-		Active:  len(group.Members) > 0,
+		Active:  groupStateIsActive(group.GroupState),
 		Members: members,
 		Lag:     lag,
 	}, true
+}
+
+// groupStateIsActive reports whether a group's broker-reported state implies
+// it currently has members, without relying on Members actually having
+// decoded successfully. This matters because kafka-go can fail to decode a
+// member's metadata (observed against a real Java consumer client) while
+// still correctly reporting GroupState — in that case Members comes back
+// empty even though the group demonstrably has a member, so len(Members) > 0
+// would silently misreport an active group as inactive. "Empty" and "Dead"
+// are Kafka's own state names for a group with no members; every other
+// state (Stable, PreparingRebalance, CompletingRebalance, ...) implies at
+// least one member is or was just attached.
+func groupStateIsActive(state string) bool {
+	switch state {
+	case "", "Empty", "Dead":
+		return false
+	default:
+		return true
+	}
 }
