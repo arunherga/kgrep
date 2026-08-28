@@ -1,20 +1,49 @@
 name: PR Integration Test
 
-# Unit tests (go test) exercise decoding/matching/filtering logic against
-# hand-built structs, but nothing exercises kgrep against a real Kafka broker
-# in CI. This workflow does that on every PR: it stands up open-source Kafka
-# (KRaft mode, no Zookeeper needed), seeds throwaway topics with known
-# messages and real consumer-group activity, builds kgrep from the PR's own
-# code, and runs real assertions against real output — covering every
-# command (topics, describe-topic, dump, consume, print, update),
-# consumer-group/lag reporting (both active and inactive), multi-partition
-# coverage, the --max-messages exactness guarantee, time-window filtering,
-# and bad-record detection.
+# Two tiers of testing on every PR:
+#
+# 1. build-and-test: builds kgrep and runs the full unit test suite (with
+#    -race) natively on Linux, Windows, and macOS. This is the only way to
+#    actually exercise the code on all three platforms in CI — the release
+#    workflow cross-compiles all 5 binaries from a single Linux runner, which
+#    never runs the Windows/macOS output at all, so this is what actually
+#    catches platform-specific bugs (path handling, line endings, file
+#    permissions, etc.) that cross-compilation can't.
+#
+# 2. integration-test: stands up a real, open-source Kafka cluster (KRaft
+#    mode, no Zookeeper) plus a real Schema Registry, seeds throwaway topics
+#    with known messages/schemas and real consumer-group activity, builds
+#    kgrep from the PR's own code, and runs real assertions against real
+#    output — covering every command, consumer-group/lag reporting,
+#    multi-partition coverage, the --max-messages exactness guarantee,
+#    time-window filtering, bad-record detection, and Avro/JSON Schema/
+#    Protobuf decoding. This one is Linux-only, not by choice but by
+#    platform constraint: GitHub-hosted macOS runners have no Docker daemon
+#    at all, and Windows runners only support Windows containers, not the
+#    Linux containers these images require — there is no way to run this
+#    tier on those platforms in GitHub-hosted CI.
 on:
   pull_request:
     branches: [main]
 
 jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
   integration-test:
     runs-on: ubuntu-latest
     steps:
